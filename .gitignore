@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------
+# Terraform: state, local caches, plans, real variable files
+# ---------------------------------------------------------------
+# State can contain secrets and must live only in the S3 backend.
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+crash.*.log
+tfplan
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# Real variable files stay local; commit only *.tfvars.example.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored. Commit it.
+
+# ---------------------------------------------------------------
+# Secrets and local environment files
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+.aws/
+
+# ---------------------------------------------------------------
+# Node (app/backend and app/frontend)
+# ---------------------------------------------------------------
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+npm-debug.log*
+# NOTE: upstream ignored backend/prisma/migrations/. We do NOT, because
+# `prisma migrate deploy` needs them. package-lock.json is committed too.
+
+# ---------------------------------------------------------------
+# Evidence, scratch and editor/OS files
+# ---------------------------------------------------------------
+# Screenshots and scan output are kept outside the repo; this is a safety net.
+evidence/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
