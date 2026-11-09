@@ -1,0 +1,57 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      DATABASE_URL: postgresql://pgadmin:1234@db:5432/digital_wallet
+      JWT_SECRET_KEY: fa7910286fe158fe1712b717a420ad5af92397cd6a081f45dec4840a20c1b4e3
+      PORT: 8081
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    depends_on:
+      - db
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8081/api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+  db:
+    image: postgres:15
+    container_name: postgres_db
+    ports:
+      - "6432:5432"
+    environment:
+      POSTGRES_USER: pgadmin
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: digital_wallet
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  prisma-studio:
+    image: node:20
+    working_dir: /app
+    ports:
+      - "5555:5555"
+    environment:
+      DATABASE_URL: postgresql://pgadmin:1234@db:5432/digital_wallet
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "npm install && npx prisma generate && npx prisma studio --port 5555"
+    depends_on:
+      - db
+
+volumes:
+  db_data:

@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  email     String   @unique
+  password  String
+  accounts  Account[]
+  createdAt DateTime @default(now())
+}
+
+model Account {
+  id          Int           @id @default(autoincrement())
+  userId      Int
+  balance     Float         @default(0.0)
+  transactionsFrom Transaction[] @relation("FromAccount")
+  transactionsTo   Transaction[] @relation("ToAccount")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId]) // Add index for userId
+}
+
+model Transaction {
+  id            Int      @id @default(autoincrement())
+  fromAccountId Int?
+  toAccountId   Int?
+  type          String   // "DEPOSIT", "WITHDRAW", or "TRANSFER"
+  amount        Float
+  status        String   // "SUCCESS" or "FAILURE"
+  createdAt     DateTime @default(now())
+
+  fromAccount Account? @relation("FromAccount", fields: [fromAccountId], references: [id], onDelete: Cascade)
+  toAccount   Account? @relation("ToAccount", fields: [toAccountId], references: [id], onDelete: Cascade)
+
+  @@index([fromAccountId])
+  @@index([toAccountId])
+  @@index([type])
+}
