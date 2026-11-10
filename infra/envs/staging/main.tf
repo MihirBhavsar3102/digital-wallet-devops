@@ -62,5 +62,5 @@ module "compute" {
   security_group_id     = module.security_groups.app_security_group_id
   instance_profile_name = module.iam.instance_profile_name
   instance_type         = "t3.small"
-  target_group_arns     = [] # step 1.7 attaches the load balancer's target groups
+  target_group_arns     = [module.alb.frontend_target_group_arn, module.alb.backend_target_group_arn]
 }
