@@ -4,7 +4,7 @@ A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app an
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
 > **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR,
-> IAM and compute are in place. The load balancer, database, pipeline and monitoring are not written yet.
+> IAM, compute and the load balancer are in place. The database, pipeline and monitoring are not written yet.
 
 ## Terraform state
 
@@ -190,7 +190,7 @@ useless to anyone but a job from this repository and environment.
 
 `infra/modules/compute/` runs the application on EC2 instances in an Auto Scaling group, spread over
 both private-app subnets (one per AZ). The instances have no public IP address. Traffic reaches them
-through the load balancer, which is added in the next step.
+through the [load balancer](#load-balancer-alb).
 
 ### Instances
 
@@ -225,7 +225,7 @@ containers, because both use ports 80 and 8081.
 
 - Minimum 1, desired 2 and maximum 3 instances.
 - Health check type `ELB` with a 300 second grace period, which covers the `user_data` install.
-  Once target groups are attached, an instance that fails the load balancer's health check is replaced.
+  An instance that fails the load balancer's health check is replaced.
 - Rolling instance refresh, keeping at least 50% of capacity healthy. The group references
   `latest_version` of the launch template, so editing the template (including `user_data`) replaces the
   instances one at a time.
@@ -266,6 +266,64 @@ HTTPS in `user_data`, which replaces the instances through the rolling refresh o
 The AMI lookup uses `most_recent = true`. When Canonical publishes a new image, the next plan shows a
 launch template change that rolls the instances onto it. This picks up security fixes without a code
 change, but in production it means a plan can contain a replacement nobody wrote.
+
+## Load balancer (ALB)
+
+`infra/modules/alb/` puts an internet-facing Application Load Balancer in the two public subnets, using
+the `alb` security group. It is the only public entry point: the instances behind it are private.
+
+- **Invalid header fields are dropped** (`drop_invalid_header_fields`), so malformed headers never reach
+  the application.
+- **Deletion protection** is the `deletion_protection` variable: off in staging so it can be destroyed to
+  save money, on in production.
+- The HTTP listener on port 80 forwards to the frontend by default.
+
+### Routing and health checks
+
+| Request | Target group | Instance port | Health check path |
+|---------|--------------|---------------|-------------------|
+| everything else (default) | `<name_prefix>-fe-tg` (frontend) | 80 | `/` |
+| `/api` and `/api/*` (listener rule, priority 10) | `<name_prefix>-be-tg` (backend) | 8081 | `/api` |
+
+- The upstream app already serves everything under `/api`, so the rule forwards without rewriting the path.
+- Both are `instance` target groups. A target is healthy after 2 checks, 15 seconds apart, and removed after
+  3 failures. Deregistration delay is a short 30 seconds. The Auto Scaling group registers its instances with
+  both groups.
+- `/api` is the backend's existing route (it returns the "Hello World" greeting). Switch the health check to a
+  dedicated `/api/health` once the app has one, using the `backend_health_check_path` variable.
+- The frontend and backend ports default to 80 and 8081 here and in the security-groups module. They are not
+  linked, so change them in both places.
+
+### Access logs
+
+Access logs go to a dedicated bucket, `<name_prefix>-alb-logs-<account-id>`, under the prefix `alb`:
+
+- **Encryption is SSE-S3 (AES256)**, because load balancer access logs do not support KMS keys.
+- All public access is blocked, and logs expire after 30 days (`access_log_retention_days`).
+- The bucket policy allows the load balancer log writer, and denies any request not made over TLS. The
+  writer is the regional account returned by the `aws_elb_service_account` data source, so no account ID is
+  hard-coded. That data source is correct for Mumbai. AWS Regions opened since December 2021 need a
+  service principal instead, so check this before moving to a newer region.
+- The load balancer test-writes to the bucket when it is created, so the policy is created first.
+- Production keeps its logs when the bucket is destroyed, and staging can delete it with its contents.
+
+### Checked on staging
+
+Both target groups showed two healthy targets, and the load balancer's DNS name returned the placeholder
+page, alternating between the two instances. `/api` returned `200` with the placeholder body. The listener
+rule, the target group settings and the load balancer attributes (invalid headers dropped, access logs
+on) matched the configuration. The log bucket had the expected encryption, public access block and
+30 day lifecycle rule, and logs were delivered, so the HTTPS-only bucket policy does not block the
+log writer.
+
+### HTTP only for now
+
+There is no domain, so there is no ACM certificate, no HTTPS listener and no redirect from 80 to 443. With a
+domain, add an ACM certificate, a 443 listener, a redirect on port 80, and a 443 ingress rule on the `alb`
+security group. Until then, traffic between clients and the load balancer is not encrypted.
+
+Once the real backend is deployed, its Swagger UI at `/api/docs` will be reachable through the load balancer
+too, because the `/api/*` rule forwards it. Consider blocking it in production.
 
 ## Repo layout
 
