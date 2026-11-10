@@ -1,0 +1,63 @@
+#!/bin/bash
+set -eux
+export DEBIAN_FRONTEND=noninteractive
+snap wait system seed.loaded
+
+apt-get update
+apt-get install -y ca-certificates curl gnupg
+
+# --- Docker Engine and the Compose plugin (Docker's official apt repository)
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+systemctl enable --now docker
+
+# --- AWS CLI: deploy.sh uses it for the ECR login and Secrets Manager
+snap install aws-cli --classic
+
+# --- CloudWatch agent (its configuration is added in the monitoring step)
+curl -fsSL -o /tmp/amazon-cloudwatch-agent.deb https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+dpkg -i -E /tmp/amazon-cloudwatch-agent.deb
+rm -f /tmp/amazon-cloudwatch-agent.deb
+
+# --- /opt/app, instance settings and deploy.sh
+mkdir -p /opt/app/placeholder
+cat > /opt/app/instance.env <<ENV_EOF
+REGION=${region}
+ACCOUNT_ID=${account_id}
+NAME_PREFIX=${name_prefix}
+ENV_EOF
+echo "${deploy_script_b64}" | base64 -d > /opt/app/deploy.sh
+chmod 0750 /opt/app/deploy.sh
+
+# --- Placeholder container: lets load balancer health checks pass before the first real deploy.
+# IMDSv2 is required on these instances, so the metadata calls need a session token.
+TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
+cat > /opt/app/placeholder/index.html <<HTML_EOF
+<!doctype html><title>Digital Wallet placeholder</title>
+<h1>Digital Wallet: placeholder</h1>
+<p>No application has been deployed yet.</p>
+<p>Served by instance $INSTANCE_ID in $AZ</p>
+HTML_EOF
+
+cat > /opt/app/placeholder/default.conf <<'CONF_EOF'
+server {
+  listen 80;
+  listen 8081;
+  root /usr/share/nginx/html;
+  location /api { default_type text/plain; return 200 'placeholder ok'; }
+  location / { try_files $uri /index.html; }
+}
+CONF_EOF
+
+docker run -d --name placeholder --restart unless-stopped \
+  -p 80:80 -p 8081:8081 \
+  -v /opt/app/placeholder/default.conf:/etc/nginx/conf.d/default.conf:ro \
+  -v /opt/app/placeholder/index.html:/usr/share/nginx/html/index.html:ro \
+  public.ecr.aws/nginx/nginx:stable-alpine
