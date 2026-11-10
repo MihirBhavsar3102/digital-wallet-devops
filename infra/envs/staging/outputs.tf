@@ -45,3 +45,13 @@ output "alb_dns_name" {
   description = "DNS name of the application load balancer. Open http://<this> to reach the app."
   value       = module.alb.alb_dns_name
 }
+
+output "db_endpoint" {
+  description = "DNS name of the PostgreSQL instance. Only reachable from the app tier."
+  value       = module.rds.address
+}
+
+output "db_master_secret_arn" {
+  description = "ARN of the Secrets Manager secret with the database master credentials (created and rotated by RDS). This is an ARN, not the password."
+  value       = module.rds.master_user_secret_arn
+}
