@@ -84,3 +84,47 @@ resource "aws_nat_gateway" "this" {
   depends_on    = [aws_internet_gateway.this]
   tags          = { Name = "${var.name_prefix}-nat-${local.azs[count.index]}" }
 }
+
+resource "aws_route_table" "private_app" {
+  count  = local.az_count
+  vpc_id = aws_vpc.this.id
+  tags   = { Name = "${var.name_prefix}-private-app-rt-${local.azs[count.index]}" }
+}
+
+resource "aws_route" "private_app_nat" {
+  count                  = local.az_count
+  route_table_id         = aws_route_table.private_app[count.index].id
+  destination_cidr_block = "0.0.0.0/0"
+  # staging: both AZs use NAT [0]; prod: AZ-a uses NAT [0], AZ-b uses NAT [1]
+  nat_gateway_id = aws_nat_gateway.this[min(count.index, local.nat_count - 1)].id
+}
+
+resource "aws_route_table_association" "private_app" {
+  count          = local.az_count
+  subnet_id      = aws_subnet.private_app[count.index].id
+  route_table_id = aws_route_table.private_app[count.index].id
+}
+
+# The DB route table has no default route: the database has no internet path.
+resource "aws_route_table" "private_db" {
+  vpc_id = aws_vpc.this.id
+  route  = [] # explicitly empty, so Terraform removes any route added by hand
+  tags   = { Name = "${var.name_prefix}-private-db-rt" }
+}
+
+resource "aws_route_table_association" "private_db" {
+  count          = local.az_count
+  subnet_id      = aws_subnet.private_db[count.index].id
+  route_table_id = aws_route_table.private_db.id
+}
+
+data "aws_region" "current" {}
+
+# Free. ECR image layers come from S3, so this keeps that traffic off the NAT.
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.this.id
+  service_name      = "com.amazonaws.${data.aws_region.current.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = aws_route_table.private_app[*].id
+  tags              = { Name = "${var.name_prefix}-s3-endpoint" }
+}

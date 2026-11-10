@@ -18,3 +18,11 @@ output "private_db_subnet_ids" {
   description = "Private db subnet IDs (RDS), one per AZ."
   value       = aws_subnet.private_db[*].id
 }
+output "private_app_route_table_ids" {
+  description = "Route table IDs of the private-app subnets, one per AZ."
+  value       = aws_route_table.private_app[*].id
+}
+output "nat_gateway_public_ips" {
+  description = "Elastic IPs of the NAT gateways (useful for allow-listing outbound traffic)."
+  value       = aws_eip.nat[*].public_ip
+}
