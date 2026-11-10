@@ -209,12 +209,13 @@ through the [load balancer](#load-balancer-alb).
 
 A short `user_data` script runs once per instance and:
 
-1. installs Docker Engine and the Compose plugin from Docker's official apt repository;
-2. installs the AWS CLI (used by `deploy.sh` for the ECR login and Secrets Manager) and the CloudWatch
+1. switches Ubuntu's apt sources to HTTPS (see [Ubuntu package updates over HTTPS](#ubuntu-package-updates-over-https));
+2. installs Docker Engine and the Compose plugin from Docker's official apt repository;
+3. installs the AWS CLI (used by `deploy.sh` for the ECR login and Secrets Manager) and the CloudWatch
    agent (its configuration is added in the monitoring step);
-3. creates `/opt/app/` containing `instance.env` (region, account ID, name prefix) and `deploy.sh`, a copy
+4. creates `/opt/app/` containing `instance.env` (region, account ID, name prefix) and `deploy.sh`, a copy
    of `scripts/deploy.sh`, which is still a skeleton until the pipeline step;
-4. starts a **placeholder** nginx container on ports 80 and 8081, so load balancer health checks pass
+5. starts a **placeholder** nginx container on ports 80 and 8081, so load balancer health checks pass
    before the first real deploy. Its page shows which instance answered, and `/api` returns 200. The
    image comes from the public ECR mirror of nginx, which avoids Docker Hub's pull rate limits.
 
@@ -252,14 +253,24 @@ the placeholder container was running, Docker, Compose, the AWS CLI and the Clou
 installed, `deploy.sh` was in place (mode 750, owned by root), an unauthenticated metadata request
 returned `401`, no key pair was attached, and the volumes were encrypted gp3.
 
-### Known limitation: Ubuntu package updates
+### Ubuntu package updates over HTTPS
 
 Ubuntu's own apt mirrors are configured with plain `http://` (port 80), but the `app` security group only
-allows outbound HTTPS. From an instance, `http://ap-south-1.ec2.archive.ubuntu.com` times out and the same
-mirror over `https://` returns 200, so `apt` cannot download Ubuntu's package indexes and
-`unattended-upgrades` cannot fetch security updates. Docker's repository, snap, ECR, SSM and
-CloudWatch are unaffected, because they all use HTTPS. The planned fix is to switch the apt sources to
-HTTPS in `user_data`, which replaces the instances through the rolling refresh once applied.
+allows outbound HTTPS. This was found on staging: from an instance, `http://ap-south-1.ec2.archive.ubuntu.com`
+timed out while the same mirror over `https://` returned 200, and the boot log showed Ubuntu's package
+indexes failing to download. So `apt` could not fetch Ubuntu's packages and `unattended-upgrades` could not
+fetch security updates. Docker's repository, snap, ECR, SSM and CloudWatch were unaffected, because they all
+use HTTPS.
+
+`user_data` now rewrites the `URIs:` lines of `/etc/apt/sources.list.d/*.sources` to `https://` before the
+first `apt-get update`. The security group stays HTTPS-only, and no port 80 rule is added. A missing or
+renamed sources file on a future image does not abort the boot.
+
+The change was tested on a running staging instance by switching a copy of the source files in a throwaway
+directory: `apt-get update` fetched 35.8 MB over HTTPS and exited 0, and `postgresql-client` became
+visible. It takes effect on instances launched after the launch template change is applied, because the
+rolling instance refresh then replaces the running instances one at a time. Instances launched before that
+still have the problem.
 
 ### Image updates
 
@@ -404,9 +415,9 @@ The instance was `available` with the settings above, on the two private-db subn
 to `digital_wallet` over TLS. From the laptop the name resolved to a private address (`10.10.21.112`) and a
 connection to port 5432 failed. Both log groups existed with 30 day retention.
 
-Application instances have no `psql`, and while the
-[apt limitation](#known-limitation-ubuntu-package-updates) stands, `apt` cannot install it. A container
-works either way:
+Application instances have no `psql` installed. Once the
+[apt-over-HTTPS fix](#ubuntu-package-updates-over-https) is applied, `postgresql-client` can be installed
+with `apt`. A container works either way:
 
 ```
 PW=$(aws secretsmanager get-secret-value --secret-id <secret-arn> --query SecretString --output text \
