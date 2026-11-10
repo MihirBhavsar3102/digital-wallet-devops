@@ -45,3 +45,13 @@ module "iam" {
   db_secret_name      = "${local.name_prefix}-db-credentials"
   allow_db_snapshot   = false # staging: the deploy role gets no database snapshot permission
 }
+
+module "compute" {
+  source                = "../../modules/compute"
+  name_prefix           = local.name_prefix
+  subnet_ids            = module.network.private_app_subnet_ids
+  security_group_id     = module.security_groups.app_security_group_id
+  instance_profile_name = module.iam.instance_profile_name
+  instance_type         = "t3.small"
+  target_group_arns     = [] # step 1.7 attaches the load balancer's target groups
+}
