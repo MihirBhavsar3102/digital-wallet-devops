@@ -3,8 +3,8 @@
 A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app and run it on AWS
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
-> **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR
-> and IAM are in place. The database, compute, load balancer, pipeline and monitoring are not written yet.
+> **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR,
+> IAM and compute are in place. The load balancer, database, pipeline and monitoring are not written yet.
 
 ## Terraform state
 
@@ -179,10 +179,93 @@ useless to anyone but a job from this repository and environment.
 - The RDS instance identifier must be `<name_prefix>-db`, and pre-deploy snapshots must be named
   `<name_prefix>-<anything>`, to match the prod snapshot permission.
 - Instances must carry the tag `environment=<env>` or the deploy role cannot run commands on them.
-  Provider `default_tags` are not applied to instances launched by an Auto Scaling group, so the tag has
-  to be set on the launch template or the group.
-- **Not exercised yet:** the secret ARN pattern and the `ssm:resourceTag/environment` condition are
-  tested once the RDS and compute steps create a real secret and instances.
+  Provider `default_tags` are not applied to instances launched by an Auto Scaling group, so the
+  [compute module](#compute) sets the tag on the group with propagation. Checked on staging: both
+  instances carry `environment=staging` and `Role=app`.
+- **Not exercised yet:** the secret ARN pattern, and the `ssm:resourceTag/environment` condition
+  itself. The tag it needs is in place, but the condition is only tested once the pipeline runs
+  `ssm:SendCommand` as the deploy role, and the ARN pattern once the RDS step creates a real secret.
+
+## Compute
+
+`infra/modules/compute/` runs the application on EC2 instances in an Auto Scaling group, spread over
+both private-app subnets (one per AZ). The instances have no public IP address. Traffic reaches them
+through the load balancer, which is added in the next step.
+
+### Instances
+
+- **Image:** the latest Ubuntu LTS (26.04), looked up with an `aws_ami` data source. The owner is
+  Canonical's account ID, `099720109477`, taken from Ubuntu's AWS documentation, and the name filter is
+  `ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-*`.
+- **Type:** the `instance_type` variable, `t3.small` in both environments. It must be an x86_64 family,
+  because the image is amd64, and validation rejects Graviton types such as `t4g`.
+- **IAM:** the [instance profile](#ec2-instance-role) from the IAM module.
+- **IMDSv2 is required** (`http_tokens = "required"`), so the metadata service refuses unauthenticated
+  requests. The hop limit is 2, so containers can reach the instance's credentials.
+- **Storage:** a 20 GiB gp3 root volume with encryption on.
+- **No key pair.** There is no SSH, as described under [security groups](#no-ssh-access-goes-through-ssm).
+
+### First boot
+
+A short `user_data` script runs once per instance and:
+
+1. installs Docker Engine and the Compose plugin from Docker's official apt repository;
+2. installs the AWS CLI (used by `deploy.sh` for the ECR login and Secrets Manager) and the CloudWatch
+   agent (its configuration is added in the monitoring step);
+3. creates `/opt/app/` containing `instance.env` (region, account ID, name prefix) and `deploy.sh`, a copy
+   of `scripts/deploy.sh`, which is still a skeleton until the pipeline step;
+4. starts a **placeholder** nginx container on ports 80 and 8081, so load balancer health checks pass
+   before the first real deploy. Its page shows which instance answered, and `/api` returns 200. The
+   image comes from the public ECR mirror of nginx, which avoids Docker Hub's pull rate limits.
+
+`deploy.sh` has to remove the placeholder (`docker rm -f placeholder`) before it starts the real
+containers, because both use ports 80 and 8081.
+
+### Auto Scaling group
+
+- Minimum 1, desired 2 and maximum 3 instances.
+- Health check type `ELB` with a 300 second grace period, which covers the `user_data` install.
+  Once target groups are attached, an instance that fails the load balancer's health check is replaced.
+- Rolling instance refresh, keeping at least 50% of capacity healthy. The group references
+  `latest_version` of the launch template, so editing the template (including `user_data`) replaces the
+  instances one at a time.
+
+### Tags and SSM
+
+Provider `default_tags` are not applied to instances launched by an Auto Scaling group, so the module
+reads them with an `aws_default_tags` data source and sets all of them on the group with
+`propagate_at_launch`, together with `Name` and `Role=app`. The volumes get the same tags from the
+launch template. `Role=app` is what SSM Run Command targets:
+
+```
+aws ssm describe-instance-information
+aws ssm start-session --target <instance-id>        # needs the Session Manager plugin installed locally
+aws ssm send-command --document-name AWS-RunShellScript --targets "Key=tag:Role,Values=app" \
+    --parameters 'commands=sudo docker ps'
+```
+
+### Checked on staging
+
+Two instances were `InService` in `ap-south-1a` and `ap-south-1b` and both appeared as `Online` managed
+nodes in Systems Manager. The SSM agent comes preinstalled on Canonical's AMIs. On both instances:
+the placeholder container was running, Docker, Compose, the AWS CLI and the CloudWatch agent were
+installed, `deploy.sh` was in place (mode 750, owned by root), an unauthenticated metadata request
+returned `401`, no key pair was attached, and the volumes were encrypted gp3.
+
+### Known limitation: Ubuntu package updates
+
+Ubuntu's own apt mirrors are configured with plain `http://` (port 80), but the `app` security group only
+allows outbound HTTPS. From an instance, `http://ap-south-1.ec2.archive.ubuntu.com` times out and the same
+mirror over `https://` returns 200, so `apt` cannot download Ubuntu's package indexes and
+`unattended-upgrades` cannot fetch security updates. Docker's repository, snap, ECR, SSM and
+CloudWatch are unaffected, because they all use HTTPS. The planned fix is to switch the apt sources to
+HTTPS in `user_data`, which replaces the instances through the rolling refresh once applied.
+
+### Image updates
+
+The AMI lookup uses `most_recent = true`. When Canonical publishes a new image, the next plan shows a
+launch template change that rolls the instances onto it. This picks up security fixes without a code
+change, but in production it means a plan can contain a replacement nobody wrote.
 
 ## Repo layout
 
