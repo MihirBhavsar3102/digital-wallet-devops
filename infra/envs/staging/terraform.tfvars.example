@@ -1,7 +1,32 @@
-# Copy this file to staging.tfvars and fill in real values.
-# staging.tfvars is gitignored. This example file is committed.
+# Template for a new environment's tfvars file. Copy it to <env>.tfvars and set the values.
+# staging.tfvars and prod.tfvars are committed (they hold no secrets, see them for real values).
+# Anything personal or secret goes in local.tfvars, which git ignores.
 
-environment = "staging"
+environment = "staging" # staging or prod
 aws_region  = "ap-south-1"
-owner       = "MihirBhavsar3102"
-vpc_cidr    = "10.10.0.0/16"
+owner       = "your-name-or-team"
+
+# network
+vpc_cidr           = "10.10.0.0/16" # /16 to /19; use a different range per environment
+single_nat_gateway = true           # true: one shared NAT (cheaper, single point of failure); false: one per AZ
+# az_count           = 2            # 2 or 3
+# alb_ingress_cidrs  = ["0.0.0.0/0"] # who may reach the load balancer
+
+# compute
+instance_type        = "t3.small" # x86_64 only
+asg_min_size         = 1
+asg_desired_capacity = 1
+asg_max_size         = 2
+
+# database
+db_instance_class          = "db.t4g.micro"
+db_multi_az                = false # true in production
+db_backup_retention_period = 1     # 7 or more in production
+
+# protection and retention
+deletion_protection = false # true in production
+allow_db_snapshot   = false # true in production
+log_retention_days  = 14    # 30 or more in production; must be a value CloudWatch Logs accepts
+
+# Optional: tags added to every resource.
+# extra_tags = { cost-centre = "engineering" }

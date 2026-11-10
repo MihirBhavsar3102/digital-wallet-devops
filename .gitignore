@@ -13,10 +13,14 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-# Real variable files stay local; commit only *.tfvars.example.
+# Variable files stay local by default, except the two environments' files below. Those hold no
+# secrets (the database password and JWT secret are never variables), they are what makes staging
+# and production differ, and CI needs them. Anything personal or secret goes in local.tfvars.
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
+!staging.tfvars
+!prod.tfvars
 # NOTE: .terraform.lock.hcl is intentionally NOT ignored. Commit it.
 
 # ---------------------------------------------------------------
