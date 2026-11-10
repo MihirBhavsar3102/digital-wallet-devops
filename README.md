@@ -3,8 +3,30 @@
 A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app and run it on AWS
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
-> **Status: work in progress.** Only the repository setup is done so far. The infrastructure,
-> pipeline, monitoring and the rest of this README are not written yet.
+> **Status: work in progress.** The Terraform skeleton and remote state are in place. The rest of
+> the infrastructure, pipeline and monitoring are not written yet.
+
+## Terraform state
+
+Each environment keeps its state in one S3 bucket, `digital-wallet-shared-tfstate-<account-id>`,
+under its own key (`staging/terraform.tfstate`, `prod/terraform.tfstate`). The bucket has
+versioning, AES256 encryption, all public access blocked, a policy denying non-TLS requests,
+and `prevent_destroy`. Locking uses S3's native lock file (`use_lockfile = true`, Terraform >= 1.10).
+No DynamoDB table is needed, as that method is deprecated in the current docs.
+
+### The chicken-and-egg step
+
+A Terraform backend bucket must exist before an environment can use it, but Terraform needs
+somewhere to store state to create that bucket. `infra/bootstrap/` breaks the loop: it uses
+**local** state and is applied by hand, once. Its `terraform.tfstate` is git-ignored.
+
+### Limitations
+
+- Bootstrap state exists only on the machine that applied it. If lost, the bucket must be re-imported
+  (`terraform import`) before bootstrap can be managed again. No locking or versioning protects it.
+- Only one person or machine can safely run bootstrap.
+- `prevent_destroy` means destroying the bucket needs a deliberate code change first.
+- The AWS account ID appears in each `backend.tf` because backend blocks cannot use variables.
 
 ## Repo layout
 
