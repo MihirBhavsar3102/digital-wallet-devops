@@ -3,6 +3,12 @@ set -eux
 export DEBIAN_FRONTEND=noninteractive
 snap wait system seed.loaded
 
+# Ubuntu's apt mirrors default to plain HTTP (port 80), but the app security group only allows
+# outbound HTTPS, so apt could not download Ubuntu's package indexes or security updates.
+# Switch them to HTTPS before the first apt-get update. "|| true" keeps a renamed or missing
+# sources file on a future image from aborting the whole boot.
+sed -i '/^URIs:/ s|http://|https://|g' /etc/apt/sources.list.d/*.sources || true
+
 apt-get update
 apt-get install -y ca-certificates curl gnupg
 
