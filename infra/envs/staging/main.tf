@@ -46,6 +46,15 @@ module "iam" {
   allow_db_snapshot   = false # staging: the deploy role gets no database snapshot permission
 }
 
+module "alb" {
+  source              = "../../modules/alb"
+  name_prefix         = local.name_prefix
+  vpc_id              = module.network.vpc_id
+  public_subnet_ids   = module.network.public_subnet_ids
+  security_group_id   = module.security_groups.alb_security_group_id
+  deletion_protection = false # staging: can be destroyed to save money
+}
+
 module "compute" {
   source                = "../../modules/compute"
   name_prefix           = local.name_prefix

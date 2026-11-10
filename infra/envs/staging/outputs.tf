@@ -40,3 +40,8 @@ output "db_security_group_id" {
   description = "ID of the database security group."
   value       = module.security_groups.db_security_group_id
 }
+
+output "alb_dns_name" {
+  description = "DNS name of the application load balancer. Open http://<this> to reach the app."
+  value       = module.alb.alb_dns_name
+}
