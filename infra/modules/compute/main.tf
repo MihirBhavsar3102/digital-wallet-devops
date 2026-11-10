@@ -38,9 +38,12 @@ resource "aws_launch_template" "app" {
   }
 
   metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required" # IMDSv2 only
-    http_put_response_hop_limit = 2          # lets containers reach the metadata service
+    http_endpoint = "enabled"
+    http_tokens   = "required" # IMDSv2 only
+    # 1 keeps the metadata service (and the role's credentials) out of reach of containers. deploy.sh runs
+    # on the host and passes secrets in as environment variables, so no container needs AWS credentials.
+    # Raise it to 2 only if a container ever has to call AWS with the instance role.
+    http_put_response_hop_limit = 1
   }
 
   block_device_mappings {
@@ -57,6 +60,8 @@ resource "aws_launch_template" "app" {
     region            = data.aws_region.current.region
     account_id        = data.aws_caller_identity.current.account_id
     name_prefix       = var.name_prefix
+    frontend_port     = var.frontend_port
+    backend_port      = var.backend_port
     deploy_script_b64 = base64encode(file("${path.module}/../../../scripts/deploy.sh"))
   }))
 

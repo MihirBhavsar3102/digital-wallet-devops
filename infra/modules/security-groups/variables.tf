@@ -6,6 +6,15 @@ variable "vpc_id" {
   type        = string
   description = "VPC the security groups belong to."
 }
+variable "alb_ingress_cidrs" {
+  type        = list(string)
+  description = "CIDR blocks allowed to reach the load balancer on port 80."
+  default     = ["0.0.0.0/0"]
+  validation {
+    condition     = length(var.alb_ingress_cidrs) > 0 && alltrue([for c in var.alb_ingress_cidrs : can(cidrhost(c, 0))])
+    error_message = "alb_ingress_cidrs must be a non-empty list of valid IPv4 CIDR blocks."
+  }
+}
 variable "frontend_port" {
   type        = number
   description = "Port the frontend container listens on (nginx in docker-compose)."

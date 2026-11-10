@@ -23,6 +23,11 @@ output "instance_arn" {
   value       = aws_db_instance.this.arn
 }
 
+output "log_group_names" {
+  description = "Names of the CloudWatch log groups that receive the exported PostgreSQL logs, keyed by log type."
+  value       = { for type, group in aws_cloudwatch_log_group.postgres : type => group.name }
+}
+
 output "master_user_secret_arn" {
   description = "ARN of the Secrets Manager secret holding the master user credentials, created and rotated by RDS."
   value       = aws_db_instance.this.master_user_secret[0].secret_arn
