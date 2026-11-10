@@ -1,0 +1,4 @@
+# Scripts and templates run on Linux. A CRLF line ending would break them
+# ("bad interpreter" / stray \r), so force LF even when checked out on Windows.
+*.sh    text eol=lf
+*.tftpl text eol=lf
