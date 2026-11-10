@@ -29,3 +29,9 @@ module "security_groups" {
   name_prefix = local.name_prefix
   vpc_id      = module.network.vpc_id
 }
+
+module "ecr" {
+  source      = "../../modules/ecr"
+  name_prefix = local.name_prefix
+}
+
