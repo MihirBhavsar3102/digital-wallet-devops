@@ -24,3 +24,9 @@ module "network" {
   vpc_cidr           = var.vpc_cidr
   single_nat_gateway = true # staging: one shared NAT, cheaper but a single point of failure (see README)
 }
+
+module "security_groups" {
+  source      = "../../modules/security-groups"
+  name_prefix = local.name_prefix
+  vpc_id      = module.network.vpc_id
+}

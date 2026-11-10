@@ -23,3 +23,9 @@ module "network" {
   vpc_cidr           = var.vpc_cidr
   single_nat_gateway = false # prod: one NAT gateway per AZ, so one AZ failing doesn't cut outbound access
 }
+
+module "security_groups" {
+  source      = "../../modules/security-groups"
+  name_prefix = local.name_prefix
+  vpc_id      = module.network.vpc_id
+}

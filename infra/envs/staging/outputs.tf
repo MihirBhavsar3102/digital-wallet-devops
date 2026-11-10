@@ -25,3 +25,18 @@ output "private_db_subnet_ids" {
   description = "Private db subnet IDs (RDS), one per AZ."
   value       = module.network.private_db_subnet_ids
 }
+
+output "alb_security_group_id" {
+  description = "ID of the load balancer security group."
+  value       = module.security_groups.alb_security_group_id
+}
+
+output "app_security_group_id" {
+  description = "ID of the app tier security group."
+  value       = module.security_groups.app_security_group_id
+}
+
+output "db_security_group_id" {
+  description = "ID of the database security group."
+  value       = module.security_groups.db_security_group_id
+}
