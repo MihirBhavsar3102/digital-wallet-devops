@@ -3,6 +3,7 @@ locals {
 }
 
 resource "aws_ecr_repository" "this" {
+  #checkov:skip=CKV_AWS_136:AES256 encryption (the ECR default) is free; a customer-managed KMS key would add cost and key management.
   for_each             = local.repositories
   name                 = "${var.name_prefix}-${each.key}"
   image_tag_mutability = "IMMUTABLE"

@@ -1,16 +1,19 @@
 resource "aws_security_group" "alb" {
+  #checkov:skip=CKV2_AWS_5:Checkov scans this module on its own; the group is attached to the load balancer in the alb module.
   name        = "${var.name_prefix}-alb-sg"
   description = "Public entry point: HTTP from the internet to the load balancer"
   vpc_id      = var.vpc_id
   tags        = { Name = "${var.name_prefix}-alb-sg" }
 }
 resource "aws_security_group" "app" {
+  #checkov:skip=CKV2_AWS_5:Checkov scans this module on its own; the group is attached to the instances in the compute module.
   name        = "${var.name_prefix}-app-sg"
   description = "App tier: reachable from the load balancer only, no SSH"
   vpc_id      = var.vpc_id
   tags        = { Name = "${var.name_prefix}-app-sg" }
 }
 resource "aws_security_group" "db" {
+  #checkov:skip=CKV2_AWS_5:Checkov scans this module on its own; the group is attached to the database in the rds module.
   name        = "${var.name_prefix}-db-sg"
   description = "Database tier: PostgreSQL from the app tier only"
   vpc_id      = var.vpc_id
@@ -19,6 +22,7 @@ resource "aws_security_group" "db" {
 
 # ---- alb
 resource "aws_vpc_security_group_ingress_rule" "alb_http" {
+  #checkov:skip=CKV_AWS_260:The load balancer is the public entry point, so it is open to the CIDRs in alb_ingress_cidrs (the internet by default).
   for_each          = toset(var.alb_ingress_cidrs)
   security_group_id = aws_security_group.alb.id
   description       = each.value == "0.0.0.0/0" ? "HTTP from the internet" : "HTTP from ${each.value}"
@@ -52,6 +56,7 @@ resource "aws_vpc_security_group_egress_rule" "alb_to_app_backend" {
 
 # ---- app
 resource "aws_vpc_security_group_ingress_rule" "app_frontend_from_alb" {
+  #checkov:skip=CKV_AWS_260:False positive: the source is the load balancer's security group, not an IP range.
   security_group_id            = aws_security_group.app.id
   description                  = "Frontend port from the load balancer"
   ip_protocol                  = "tcp"
