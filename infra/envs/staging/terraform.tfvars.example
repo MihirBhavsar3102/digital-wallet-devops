@@ -1,0 +1,7 @@
+# Copy this file to staging.tfvars and fill in real values.
+# staging.tfvars is gitignored. This example file is committed.
+
+environment = "staging"
+aws_region  = "ap-south-1"
+owner       = "MihirBhavsar3102"
+vpc_cidr    = "10.10.0.0/16"
