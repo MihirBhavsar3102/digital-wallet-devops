@@ -4,7 +4,7 @@ A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app an
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
 > **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR,
-> IAM, compute and the load balancer are in place. The database, pipeline and monitoring are not written yet.
+> IAM, compute, the load balancer and the database are in place. The pipeline and monitoring are not written yet.
 
 ## Terraform state
 
@@ -138,7 +138,7 @@ privilege, with no wildcard on anything that supports resource-level permissions
 | `CloudWatchAgentServerPolicy` (AWS-managed) | CloudWatch agent metrics and logs |
 | ECR pull: `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability` | This environment's two repositories only |
 | `ecr:GetAuthorizationToken` | `*`, because AWS does not support scoping this action to a resource |
-| `secretsmanager:GetSecretValue` | The one database secret, `<name_prefix>-db-credentials`, only |
+| `secretsmanager:GetSecretValue` | The RDS-managed master user secret only, by its exact ARN |
 
 ### GitHub Actions deploy roles (OIDC)
 
@@ -174,17 +174,17 @@ useless to anyone but a job from this repository and environment.
 
 ### Conventions that later steps must follow
 
-- The database secret must be named `<name_prefix>-db-credentials`. The policy matches its ARN as
-  that name plus `-??????`, because Secrets Manager adds a hyphen and six random characters.
 - The RDS instance identifier must be `<name_prefix>-db`, and pre-deploy snapshots must be named
-  `<name_prefix>-<anything>`, to match the prod snapshot permission.
+  `<name_prefix>-<anything>`, to match the prod snapshot permission. The [database](#database-rds-postgresql)
+  module follows the identifier rule, and names the prod final snapshot `<name_prefix>-final`.
+- The instance role reads the database secret by its exact ARN, passed in from the RDS module. RDS
+  chooses the secret's name itself (`rds!db-<id>`), so a naming convention could not have worked.
 - Instances must carry the tag `environment=<env>` or the deploy role cannot run commands on them.
   Provider `default_tags` are not applied to instances launched by an Auto Scaling group, so the
   [compute module](#compute) sets the tag on the group with propagation. Checked on staging: both
   instances carry `environment=staging` and `Role=app`.
-- **Not exercised yet:** the secret ARN pattern, and the `ssm:resourceTag/environment` condition
-  itself. The tag it needs is in place, but the condition is only tested once the pipeline runs
-  `ssm:SendCommand` as the deploy role, and the ARN pattern once the RDS step creates a real secret.
+- **Not exercised yet:** the `ssm:resourceTag/environment` condition. The tag it needs is in place,
+  but the condition is only tested once the pipeline runs `ssm:SendCommand` as the deploy role.
 
 ## Compute
 
@@ -324,6 +324,103 @@ security group. Until then, traffic between clients and the load balancer is not
 
 Once the real backend is deployed, its Swagger UI at `/api/docs` will be reachable through the load balancer
 too, because the `/api/*` rule forwards it. Consider blocking it in production.
+
+## Database (RDS PostgreSQL)
+
+`infra/modules/rds/` creates one PostgreSQL instance per environment on the private-db subnets (a DB
+subnet group across both AZs). It is not publicly accessible, and its `db` security group accepts port 5432
+from the `app` group only.
+
+| Setting | Staging | Prod |
+|---------|---------|------|
+| Engine | PostgreSQL 17 (running 17.9) | PostgreSQL 17 |
+| Instance class | `db.t4g.micro` (Graviton) | `db.t4g.micro` |
+| Storage | 20 GiB gp3, encrypted | 20 GiB gp3, encrypted |
+| Multi-AZ | no | **yes** |
+| Backup retention | 1 day | 7 days |
+| Deletion protection | no | **yes** |
+| Final snapshot on deletion | none | `digital-wallet-prod-final` |
+
+The instance identifier is `<name_prefix>-db`, the database is `digital_wallet` and the master user is
+`pgadmin`, as in `app/docker-compose.yml`. Backups run at 21:00-21:30 UTC (02:30 IST) and maintenance at
+Sunday 22:00-23:00 UTC (Monday 03:30 IST), kept apart.
+
+### Engine version
+
+The version is pinned to major **17**. The application locks Prisma 6.0.1, which was released before
+PostgreSQL 18, and AWS's default for new instances in this region is 18, so leaving the version unset would
+have picked 18. With only the major given and automatic minor upgrades on, AWS keeps the instance on the
+latest 17.x. The running version is reported as `engine_version_actual`. The first real migration in staging
+is the compatibility test.
+
+### Password and secret
+
+`manage_master_user_password = true` makes RDS create the master password in Secrets Manager, so it is never
+in the code, in a variable, or in Terraform state. Checked on staging: the state holds `password = null` and
+only the secret's ARN, KMS key and status. No `random_password` fallback was needed. Had it been, the password
+would be stored in state.
+
+- RDS chooses the secret's name (`rds!db-<id>`), so the instance role reads it by its exact ARN, passed in
+  from the module.
+- The secret holds only `username` and `password`. The host, port and database name are not in it, so the
+  pipeline must build `DATABASE_URL` itself, as
+  `postgresql://pgadmin:<url-encoded password>@<endpoint>:5432/digital_wallet?sslmode=require`. Generated
+  passwords can contain characters that must be URL-encoded.
+- **The password rotates automatically every 7 days** (the provider's documented default). Checked on
+  staging: rotation is on, every 7 days. An application that reads the password once and keeps it will fail
+  to open new connections after a rotation, until it is restarted or reads the secret again. How the
+  pipeline handles this is decided in the pipeline step. Rotation can be turned off with
+  `aws_secretsmanager_secret_rotation` and `rotation_enabled = false`.
+
+### TLS and logging
+
+- **TLS is required.** The parameter group sets `rds.force_ssl = 1`. It is already the default on 17 and
+  18, but is set explicitly so it stays visible. Checked: a connection with `sslmode=disable` was refused
+  (`no pg_hba.conf entry ... no encryption`), and one with `sslmode=require` reported TLS in use. The
+  application's connection string must therefore use `sslmode=require` or stricter.
+- **Slow queries are logged** with `log_min_duration_statement = 1000` ms (variable `slow_query_threshold_ms`).
+  A 2 second `pg_sleep` run from an app instance appeared in the PostgreSQL log as
+  `duration: 2011.685 ms`.
+- The PostgreSQL and upgrade logs are exported to CloudWatch, into `/aws/rds/instance/<identifier>/postgresql`
+  and `/upgrade`. Terraform creates these log groups first, with a 30 day retention
+  (`log_retention_days`), because groups created by RDS never expire.
+- **Enhanced monitoring** runs every 60 seconds through its own IAM role
+  (`AmazonRDSEnhancedMonitoringRole`). **Performance Insights** is on with 7 day retention. The enhanced
+  monitoring data goes to the shared `RDSOSMetrics` log group, which has its own 30 day retention.
+
+### A parameter-group quirk
+
+AWS records `rds.force_ssl` as `pending-reboot` with the source `system`, and will not change the apply method
+of a default-valued parameter without changing its value. With the provider's default `apply_method` of
+`immediate`, every plan showed an in-place change that could never be applied away. The module therefore
+declares `apply_method = "pending-reboot"` for that one parameter, which matches what AWS stores and changes
+nothing in AWS. The parameter group uses `name_prefix` with `create_before_destroy`, as the provider docs
+advise, so a later major version upgrade can replace it.
+
+### Checked on staging
+
+The instance was `available` with the settings above, on the two private-db subnets, with its parameter group
+`in-sync`. From an app instance over SSM, the instance role read the secret and `psql` connected as `pgadmin`
+to `digital_wallet` over TLS. From the laptop the name resolved to a private address (`10.10.21.112`) and a
+connection to port 5432 failed. Both log groups existed with 30 day retention.
+
+Application instances have no `psql`, and while the
+[apt limitation](#known-limitation-ubuntu-package-updates) stands, `apt` cannot install it. A container
+works either way:
+
+```
+PW=$(aws secretsmanager get-secret-value --secret-id <secret-arn> --query SecretString --output text \
+     | python3 -c 'import sys,json; print(json.load(sys.stdin)["password"])')
+docker run --rm -e PGPASSWORD="$PW" -e PGSSLMODE=require public.ecr.aws/docker/library/postgres:17-alpine \
+    psql -h <endpoint> -U pgadmin -d digital_wallet -c "select version()"
+```
+
+### Cost and deletion
+
+In Mumbai (AWS price list, published 2026-10-29) `db.t4g.micro` is $0.021 per hour single-AZ and $0.042 per hour
+Multi-AZ, and gp3 storage is $0.131 per GB-month single-AZ and $0.262 Multi-AZ, so 20 GiB is $2.62 or $5.24 a
+month. Staging has no deletion protection and no final snapshot, so destroying it deletes the data. Production
+needs deletion protection turned off before it can be destroyed.
 
 ## Repo layout
 

@@ -22,9 +22,9 @@ variable "ecr_repository_arns" {
   type        = list(string)
   description = "ARNs of the ECR repositories the instances pull from and the pipeline pushes to."
 }
-variable "db_secret_name" {
+variable "db_secret_arn" {
   type        = string
-  description = "Name of the one Secrets Manager secret instances may read. The RDS step must create a secret with this name."
+  description = "ARN of the one Secrets Manager secret the instances may read: the master user secret that RDS creates and manages."
 }
 variable "allow_db_snapshot" {
   type        = bool

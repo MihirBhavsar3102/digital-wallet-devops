@@ -50,9 +50,6 @@ variable "github_repository" {
   }
 }
 
-# Pattern for secrets, added at the RDS step:
-# variable "db_password" {
-#   type        = string
-#   description = "RDS master password."
-#   sensitive   = true
-# }
+# There is deliberately no database password variable: RDS creates and rotates the master
+# password in Secrets Manager (see modules/rds), so it never passes through Terraform input.
+# Any variable that does hold a secret must be declared with sensitive = true.

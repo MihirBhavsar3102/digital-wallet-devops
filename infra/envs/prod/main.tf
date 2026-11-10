@@ -35,6 +35,18 @@ module "ecr" {
   name_prefix = local.name_prefix
 }
 
+module "rds" {
+  source                  = "../../modules/rds"
+  name_prefix             = local.name_prefix
+  subnet_ids              = module.network.private_db_subnet_ids
+  security_group_id       = module.security_groups.db_security_group_id
+  instance_class          = "db.t4g.micro"
+  multi_az                = true # prod: a standby in the second AZ
+  backup_retention_period = 7
+  deletion_protection     = true  # prod: the database cannot be deleted by accident
+  skip_final_snapshot     = false # prod: a final snapshot named <name_prefix>-final is taken on deletion
+}
+
 module "iam" {
   source              = "../../modules/iam"
   name_prefix         = local.name_prefix
@@ -42,7 +54,7 @@ module "iam" {
   github_repository   = var.github_repository
   github_environment  = var.environment # the GitHub Environment must have exactly this name
   ecr_repository_arns = values(module.ecr.repository_arns)
-  db_secret_name      = "${local.name_prefix}-db-credentials"
+  db_secret_arn       = module.rds.master_user_secret_arn
   allow_db_snapshot   = true # prod: the deploy role may snapshot the database before a deploy
 }
 
