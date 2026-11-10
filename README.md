@@ -3,8 +3,8 @@
 A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app and run it on AWS
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
-> **Status: work in progress.** The Terraform skeleton, remote state, network module and security
-> groups are in place. The rest of the infrastructure, pipeline and monitoring are not written yet.
+> **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR
+> and IAM are in place. The database, compute, load balancer, pipeline and monitoring are not written yet.
 
 ## Terraform state
 
@@ -18,12 +18,16 @@ No DynamoDB table is needed, as that method is deprecated in the current docs.
 
 A Terraform backend bucket must exist before an environment can use it, but Terraform needs
 somewhere to store state to create that bucket. `infra/bootstrap/` breaks the loop: it uses
-**local** state and is applied by hand, once. Its `terraform.tfstate` is git-ignored.
+**local** state and is applied by hand, once. Its `terraform.tfstate` is git-ignored. Bootstrap also
+creates the account-wide GitHub OIDC identity provider (see
+[Identity and access](#identity-and-access-iam)), because that provider is one per account and
+must outlive any single environment.
 
 ### Limitations
 
-- Bootstrap state exists only on the machine that applied it. If lost, the bucket must be re-imported
-  (`terraform import`) before bootstrap can be managed again. No locking or versioning protects it.
+- Bootstrap state exists only on the machine that applied it. If lost, the bucket and the OIDC
+  provider must be re-imported (`terraform import`) before bootstrap can be managed again. No locking
+  or versioning protects it.
 - Only one person or machine can safely run bootstrap.
 - `prevent_destroy` means destroying the bucket needs a deliberate code change first.
 - The AWS account ID appears in each `backend.tf` because backend blocks cannot use variables.
@@ -104,12 +108,88 @@ for deploys. Instances reach Systems Manager through the NAT gateway using the o
 on the `app` group, and authenticate with their IAM instance profile. Nothing needs to be reachable
 from the internet to administer them.
 
+## Container registry (ECR)
+
+`infra/modules/ecr/` creates two repositories per environment, named
+`digital-wallet-<env>-frontend` and `digital-wallet-<env>-backend`.
+
+- **Immutable tags.** A tag can never be overwritten, so a tag that was deployed always means the
+  same image. The pipeline therefore has to push a unique tag per build, such as the git commit SHA.
+  Pushing `latest` a second time is rejected.
+- **Scan on push** is enabled.
+- **Encryption** is AES256, the ECR default, at no extra cost. KMS was not used, to avoid per-key cost
+  and key management.
+- **Lifecycle policy:** keeps the last 10 images in each repository (the `keep_last_images` module
+  variable) and expires older ones.
+
+## Identity and access (IAM)
+
+`infra/modules/iam/` creates two roles per environment: one for the EC2 instances and one for the
+GitHub Actions pipeline.
+
+### EC2 instance role
+
+Attached to the instances through the instance profile `<name_prefix>-ec2-profile`. It is least
+privilege, with no wildcard on anything that supports resource-level permissions:
+
+| Permission | Scope |
+|------------|-------|
+| `AmazonSSMManagedInstanceCore` (AWS-managed) | Session Manager and Run Command, which replace SSH |
+| `CloudWatchAgentServerPolicy` (AWS-managed) | CloudWatch agent metrics and logs |
+| ECR pull: `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability` | This environment's two repositories only |
+| `ecr:GetAuthorizationToken` | `*`, because AWS does not support scoping this action to a resource |
+| `secretsmanager:GetSecretValue` | The one database secret, `<name_prefix>-db-credentials`, only |
+
+### GitHub Actions deploy roles (OIDC)
+
+The GitHub OIDC identity provider for `token.actions.githubusercontent.com` is created once, in
+`infra/bootstrap/`. An account can have only one provider per URL and both environments share an
+account, so it cannot live in an environment: destroying staging to save money would otherwise break
+the production pipeline's login.
+
+Each environment has its own role, `<name_prefix>-github-deploy`:
+
+| Permission | Scope |
+|------------|-------|
+| ECR push: `BatchCheckLayerAvailability`, `InitiateLayerUpload`, `UploadLayerPart`, `CompleteLayerUpload`, `PutImage` | This environment's two repositories only |
+| `ssm:SendCommand` | The `AWS-RunShellScript` document, and only instances tagged `environment=<env>` |
+| `ssm:GetCommandInvocation` | `*`, to read command results |
+| `rds:CreateDBSnapshot` (**prod only**) | The production database and snapshots named `digital-wallet-prod-*` |
+
+Each trust policy checks two claims in the GitHub token: the audience must be `sts.amazonaws.com`, and
+the subject must be exactly `repo:MihirBhavsar3102/digital-wallet-devops:environment:<env>`. In practice:
+
+- The GitHub Environments must be named exactly `staging` and `prod` (the match is case-sensitive).
+- A workflow job must declare `environment: <env>` and `permissions: id-token: write`.
+- A job from another repository, a fork, or a job with no environment produces a different subject
+  and is refused. Production can also require a reviewer's approval on its GitHub Environment.
+
+#### Why no AWS access keys live in GitHub
+
+The pipeline never holds a stored credential. For each run, GitHub issues a short-lived, signed token
+describing that run (repository and environment). AWS verifies the signature against the OIDC provider,
+checks the claims against the role's trust policy, and returns temporary credentials that expire
+after about an hour. There is no long-lived key to leak, rotate or revoke, and a stolen token is
+useless to anyone but a job from this repository and environment.
+
+### Conventions that later steps must follow
+
+- The database secret must be named `<name_prefix>-db-credentials`. The policy matches its ARN as
+  that name plus `-??????`, because Secrets Manager adds a hyphen and six random characters.
+- The RDS instance identifier must be `<name_prefix>-db`, and pre-deploy snapshots must be named
+  `<name_prefix>-<anything>`, to match the prod snapshot permission.
+- Instances must carry the tag `environment=<env>` or the deploy role cannot run commands on them.
+  Provider `default_tags` are not applied to instances launched by an Auto Scaling group, so the tag has
+  to be set on the launch template or the group.
+- **Not exercised yet:** the secret ARN pattern and the `ssm:resourceTag/environment` condition are
+  tested once the RDS and compute steps create a real secret and instances.
+
 ## Repo layout
 
 | Path | Purpose |
 |------|---------|
 | `app/` | The sample application (imported unmodified, then changed in later commits) |
-| `infra/bootstrap/` | One-off Terraform that creates the remote-state bucket |
+| `infra/bootstrap/` | One-off Terraform that creates the remote-state bucket and the account-wide GitHub OIDC provider |
 | `infra/modules/` | Reusable Terraform modules |
 | `infra/envs/staging/`, `infra/envs/prod/` | One folder per environment, both calling the same modules |
 | `.github/workflows/` | GitHub Actions pipelines |
