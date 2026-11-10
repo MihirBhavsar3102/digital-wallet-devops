@@ -3,8 +3,8 @@
 A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app and run it on AWS
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
-> **Status: work in progress.** The Terraform skeleton, remote state and network module are in
-> place. The rest of the infrastructure, pipeline and monitoring are not written yet.
+> **Status: work in progress.** The Terraform skeleton, remote state, network module and security
+> groups are in place. The rest of the infrastructure, pipeline and monitoring are not written yet.
 
 ## Terraform state
 
@@ -73,6 +73,36 @@ layers are served from S3, so image pulls bypass the NAT gateway. Interface endp
 SSM are deliberately not created: in Mumbai an interface endpoint costs $0.013 per hour plus
 $0.01 per GB (AWS price list, published 2026-11-05), roughly $95 a month for five endpoints across
 two AZs, and they are not needed on the happy path.
+
+## Security groups
+
+`infra/modules/security-groups/` creates one security group per tier. Traffic can only flow
+`internet -> alb -> app -> db`:
+
+| Group | Inbound | Outbound | Why |
+|-------|---------|----------|-----|
+| `alb` | TCP 80 from `0.0.0.0/0` (443 is added when HTTPS is) | Only to the `app` group on the app ports | The single public entry point |
+| `app` | Frontend and backend ports from the `alb` group only | 443 to the internet through NAT (ECR, SSM, CloudWatch, Secrets Manager); 5432 to the `db` group | No public ingress and no SSH |
+| `db` | TCP 5432 from the `app` group only | None | Database reachable only from the app tier |
+
+- **Groups are referenced by ID, not by CIDR.** Only two rules use a CIDR: the public HTTP rule on
+  `alb`, and the HTTPS-out rule on `app`, whose destination is the internet and so has no group ID.
+- **Every rule has a description**, and each rule is its own resource
+  (`aws_vpc_security_group_ingress_rule` / `_egress_rule`) instead of an inline block, so diffs stay
+  readable. Separate rule resources also avoid a dependency cycle between groups that reference each
+  other. A staging check found 8 rules across the three groups, none without a description.
+- **The `db` group has no egress rule at all.** Terraform removes the allow-all egress rule that AWS
+  adds to new groups, and none is added back.
+- The frontend port defaults to 80 and the backend port to 8081, as in `app/docker-compose.yml`.
+  Both are module variables.
+
+### No SSH: access goes through SSM
+
+**No security group opens port 22, and the instances have no key pairs for SSH.** Shell access and
+deployments go through AWS Systems Manager: Session Manager for an interactive shell and Run Command
+for deploys. Instances reach Systems Manager through the NAT gateway using the outbound HTTPS rule
+on the `app` group, and authenticate with their IAM instance profile. Nothing needs to be reachable
+from the internet to administer them.
 
 ## Repo layout
 
