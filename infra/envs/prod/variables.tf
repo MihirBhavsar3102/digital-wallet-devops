@@ -40,6 +40,16 @@ variable "vpc_cidr" {
   }
 }
 
+variable "github_repository" {
+  type        = string
+  description = "GitHub repository allowed to deploy to this environment, as OWNER/REPO. Not secret, so it has a default and CI needs no tfvars file."
+  default     = "MihirBhavsar3102/digital-wallet-devops"
+  validation {
+    condition     = can(regex("^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.github_repository))
+    error_message = "github_repository must look like OWNER/REPO."
+  }
+}
+
 # Pattern for secrets, added at the RDS step:
 # variable "db_password" {
 #   type        = string

@@ -35,3 +35,14 @@ module "ecr" {
   name_prefix = local.name_prefix
 }
 
+module "iam" {
+  source              = "../../modules/iam"
+  name_prefix         = local.name_prefix
+  environment         = var.environment
+  github_repository   = var.github_repository
+  github_environment  = var.environment # the GitHub Environment must have exactly this name
+  ecr_repository_arns = values(module.ecr.repository_arns)
+  db_secret_name      = "${local.name_prefix}-db-credentials"
+  allow_db_snapshot   = true # prod: the deploy role may snapshot the database before a deploy
+}
+
