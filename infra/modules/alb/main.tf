@@ -10,6 +10,11 @@ locals {
 
 # ---------- access log bucket ----------
 resource "aws_s3_bucket" "logs" {
+  #checkov:skip=CKV_AWS_144:A single region is enough for this project, and these logs expire; replication would only add cost.
+  #checkov:skip=CKV_AWS_145:Load balancer access logs support SSE-S3 only, not KMS, so AES256 is the strongest option.
+  #checkov:skip=CKV_AWS_18:This bucket is itself the log destination; logging it too would need yet another bucket.
+  #checkov:skip=CKV_AWS_21:The logs expire after the retention period; versioning would keep deleted versions and add cost.
+  #checkov:skip=CKV2_AWS_62:There is no consumer for bucket event notifications.
   bucket        = "${var.name_prefix}-alb-logs-${data.aws_caller_identity.current.account_id}"
   force_destroy = !var.deletion_protection # prod (protection on) keeps its logs; staging destroys cleanly
 }
@@ -82,6 +87,9 @@ resource "aws_s3_bucket_policy" "logs" {
 
 # ---------- load balancer ----------
 resource "aws_lb" "this" {
+  #checkov:skip=CKV2_AWS_20:There is no domain, so no certificate and no HTTPS to redirect to; see "HTTP only for now" in the README.
+  #checkov:skip=CKV2_AWS_28:A web application firewall costs extra and is out of scope for this project; listed under Accepted findings.
+  #checkov:skip=CKV_AWS_150:Deletion protection is the deletion_protection variable: off in staging so it can be destroyed, on in production.
   name                       = "${var.name_prefix}-alb"
   load_balancer_type         = "application"
   internal                   = false
@@ -102,6 +110,7 @@ resource "aws_lb" "this" {
 
 # ---------- target groups ----------
 resource "aws_lb_target_group" "frontend" {
+  #checkov:skip=CKV_AWS_378:Traffic from the load balancer to the instances stays inside the VPC; HTTPS to the instances is out of scope.
   name                 = "${var.name_prefix}-fe-tg" # target group names are limited to 32 characters
   port                 = var.frontend_port
   protocol             = "HTTP"
@@ -120,6 +129,7 @@ resource "aws_lb_target_group" "frontend" {
 }
 
 resource "aws_lb_target_group" "backend" {
+  #checkov:skip=CKV_AWS_378:Traffic from the load balancer to the instances stays inside the VPC; HTTPS to the instances is out of scope.
   name                 = "${var.name_prefix}-be-tg"
   port                 = var.backend_port
   protocol             = "HTTP"
@@ -139,6 +149,8 @@ resource "aws_lb_target_group" "backend" {
 
 # ---------- listener and routing ----------
 resource "aws_lb_listener" "http" {
+  #checkov:skip=CKV_AWS_2:HTTP only until a domain exists to get a certificate for; see "HTTP only for now" in the README.
+  #checkov:skip=CKV_AWS_103:There is no HTTPS listener yet, so there is no TLS policy to set.
   load_balancer_arn = aws_lb.this.arn
   port              = 80
   protocol          = "HTTP"

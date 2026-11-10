@@ -58,6 +58,8 @@ resource "aws_iam_role_policy_attachment" "monitoring" {
 # ---------- log groups ----------
 # Created before the instance so they get a retention period. Left to RDS, they would never expire.
 resource "aws_cloudwatch_log_group" "postgres" {
+  #checkov:skip=CKV_AWS_158:CloudWatch Logs encrypts at rest by default; a customer-managed KMS key would add cost and key management.
+  #checkov:skip=CKV_AWS_338:Retention is a per-environment variable (14 days staging, 90 days prod); one year would cost more than it is worth here.
   for_each          = toset(["postgresql", "upgrade"])
   name              = "/aws/rds/instance/${local.identifier}/${each.key}"
   retention_in_days = var.log_retention_days
@@ -65,6 +67,10 @@ resource "aws_cloudwatch_log_group" "postgres" {
 
 # ---------- the database ----------
 resource "aws_db_instance" "this" {
+  #checkov:skip=CKV_AWS_157:Multi-AZ is the db_multi_az variable: off in staging to save cost, on in production.
+  #checkov:skip=CKV_AWS_293:Deletion protection is the deletion_protection variable: off in staging so it can be destroyed, on in production.
+  #checkov:skip=CKV_AWS_161:The application signs in with the managed password; IAM database authentication would need application changes.
+  #checkov:skip=CKV_AWS_354:Performance Insights uses the default AWS-managed key; a customer-managed key would add cost and key management.
   identifier     = local.identifier
   engine         = "postgres"
   engine_version = var.engine_version

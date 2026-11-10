@@ -10,6 +10,8 @@ ephemeral "aws_secretsmanager_random_password" "jwt" {
 }
 
 resource "aws_secretsmanager_secret" "jwt" {
+  #checkov:skip=CKV_AWS_149:The secret uses the default AWS-managed Secrets Manager key; a customer-managed key would add cost and key management.
+  #checkov:skip=CKV2_AWS_57:Automatic rotation would sign out every logged-in user; the key is rotated deliberately by increasing secret_version.
   name                    = "${var.name_prefix}-jwt-secret"
   description             = "JWT signing key for the ${var.name_prefix} backend"
   recovery_window_in_days = var.recovery_window_in_days

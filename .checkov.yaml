@@ -1,0 +1,10 @@
+# Run `checkov` from the repository root. A finding is either fixed, or skipped with an inline
+# comment next to the resource (#checkov:skip=ID:reason), and every skip is listed under
+# "Accepted findings" in the README.
+directory:
+  - infra
+framework:
+  - terraform
+quiet: true
+compact: true
+skip-download: true

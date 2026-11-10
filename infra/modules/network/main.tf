@@ -1,4 +1,5 @@
 data "aws_availability_zones" "available" {
+  #checkov:skip=CKV_AWS_394:Only the first az_count names are used (slice), and a zone added later sorts last, so the chosen zones do not change.
   state = "available"
   filter {
     name   = "opt-in-status"
@@ -18,10 +19,18 @@ locals {
 }
 
 resource "aws_vpc" "this" {
+  #checkov:skip=CKV2_AWS_11:VPC flow logs cost extra and are out of scope for this project; listed under Accepted findings in the README.
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
   tags                 = { Name = "${var.name_prefix}-vpc" }
+}
+
+# Take over the VPC's default security group and leave it with no rules at all, so nothing can use
+# it by accident. Every resource uses a group from the security-groups module instead.
+resource "aws_default_security_group" "default" {
+  vpc_id = aws_vpc.this.id
+  tags   = { Name = "${var.name_prefix}-default-sg-unused" }
 }
 
 resource "aws_subnet" "public" {

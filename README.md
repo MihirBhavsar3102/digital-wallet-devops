@@ -4,8 +4,8 @@ A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app an
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
 > **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR,
-> IAM, compute, the load balancer, the database and the staging/production variables are in place. The
-> pipeline and monitoring are not written yet.
+> IAM, compute, the load balancer, the database, the staging/production variables and the quality gates
+> are in place. The pipeline and monitoring are not written yet.
 
 ## Terraform state
 
@@ -261,6 +261,12 @@ the placeholder container was running, Docker, Compose, the AWS CLI and the Clou
 installed, `deploy.sh` was in place (mode 750, owned by root), an unauthenticated metadata request
 returned `401`, no key pair was attached, and the volumes were encrypted gp3.
 
+The **metadata hop limit of 1** was checked on the replacement instance (EC2 reports hop limit 1 and tokens
+required). From the host, a token request returns `200`. From a container on the default bridge network the
+same request gets no answer, while the same container on the host network gets `200`, so it is the hop limit
+that blocks it. The instance also has no way to read other secrets: `secretsmanager:ListSecrets` and
+reading a secret that is not on its list are both `AccessDenied`.
+
 ### Ubuntu package updates over HTTPS
 
 Ubuntu's own apt mirrors are configured with plain `http://` (port 80), but the `app` security group only
@@ -494,6 +500,22 @@ secrets: the database password is created by RDS and the JWT secret by Terraform
 variable. They are what makes the environments differ, and CI needs them. `terraform.tfvars.example` is the
 template for a new environment. Anything personal or secret goes in a `local.tfvars`, which git ignores.
 
+### Checked on staging
+
+Applying this change to staging did what the saved plan said (4 to add, 5 to change, 1 to destroy). It
+created the JWT secret and the VPC's empty default security group, replaced the instance
+role's secrets policy, cut log retention to 14 days, and resized the Auto Scaling group to 1 / 1 / 2. The
+rolling refresh then replaced the instances, which took about six minutes. With a single instance the
+placeholder app is briefly unavailable during a refresh; that gap was not measured. The database, the load
+balancer and the network were not touched.
+
+Afterwards `terraform plan` reported `No changes`, both target groups showed the new instance healthy, and
+the load balancer answered with the placeholder page and `200` on `/api`. The database was still `available`,
+single-AZ, with 1 day of backups. The variable validation was exercised with six bad values, and each was
+refused before any AWS call: `log_retention_days = 10`, a backend port equal to the frontend port, a desired
+size above the maximum, `alb_ingress_cidrs = ["not-a-cidr"]`, `instance_type = "t4g.small"`, and an
+`extra_tags` map that contains `owner`.
+
 ### Cost, and running production at staging size
 
 In Mumbai (AWS price list API) a NAT gateway is $0.056 per hour, the load balancer $0.0239, a `t3.small`
@@ -527,6 +549,9 @@ CloudWatch Logs accepts.
   validation rejects those keys.
 - **No variable holds a secret.** A variable that did would have to be declared `sensitive = true`.
 
+Checked on staging: `terraform output` prints 18 outputs. None is marked sensitive, none looks like a key or a
+password, and neither the JWT key nor any database password value appears in the outputs or in the state.
+
 The outputs are the same in both environments and are all descriptions, names and ARNs, never a secret value:
 the load balancer DNS name, the VPC ID, the subnet IDs per tier, the three security group IDs, the Auto
 Scaling group name, the ECR repository URLs, the database endpoint, the database secret's ARN and the JWT
@@ -550,6 +575,10 @@ The backend signs its tokens with a JWT key. `infra/modules/secrets/` creates a 
 - **Recovery window:** 30 days with deletion protection on (prod), none otherwise (staging).
 - **Reading it:** the instance role can read exactly this secret and the database secret, nothing else. The
   output is its ARN.
+- **Checked on staging.** The secret holds a 64 character value in AWS. That value is in neither the Terraform
+  state nor the outputs (searched for it directly). The state holds only `has_secret_string_wo = true` for
+  the version resource, and `password` is also `null` for the database. The instance role read both
+  secrets, and was refused everything else.
 - The JWT key in `app/docker-compose.yml` is the upstream project's demo value and is public. It must never be
   used in AWS, and the pipeline step removes it from the compose file.
 
@@ -565,6 +594,85 @@ The backend signs its tokens with a JWT key. `infra/modules/secrets/` creates a 
 | `scripts/` | Deploy and smoke-test scripts |
 | `monitoring/` | CloudWatch agent configuration |
 | `docs/` | Challenges log and approach documentation |
+| `.tflint.hcl`, `.checkov.yaml`, `.pre-commit-config.yaml`, `.gitleaks-baseline.json` | Quality gate configuration (see [Quality gates](#quality-gates)) |
+
+## Quality gates
+
+Four tools check the Terraform and the repository. The pre-commit hooks run `terraform fmt`, tflint and
+gitleaks on every commit, and CI runs all of them, with checkov and `terraform validate`, in step 2.2.
+
+| Tool | What it checks | How to run it |
+|------|----------------|---------------|
+| `terraform fmt` and `terraform validate` | Formatting and valid configuration | `terraform fmt -recursive infra`, then `terraform validate` in each folder |
+| **tflint** (AWS ruleset 0.50.0) | Style, deprecated syntax, provider-specific mistakes | `tflint --init` once, then `tflint --chdir infra --recursive` |
+| **checkov** | Security misconfigurations | `checkov` from the repository root (settings in `.checkov.yaml`) |
+| **gitleaks** | Secrets in the staged changes and in the git history | `gitleaks git --baseline-path .gitleaks-baseline.json` |
+
+Current result: `fmt` clean, `validate` passing in every folder, **tflint 0 issues**, and **checkov 250 checks
+passed and 0 failed** (24 distinct checks accepted on purpose, below). Checked on Windows: the three pre-commit hooks
+pass, and the gitleaks hook blocks a commit that contains a token (tested with a fake one).
+
+**Pre-commit.** Install once with `pip install pre-commit` and `pre-commit install`. The hooks are
+`terraform_fmt`, `terraform_tflint`, and a local gitleaks hook that uses the gitleaks you already have and
+scans only the staged changes. It needs `terraform`, `tflint` and `gitleaks` on the PATH.
+
+**What was fixed.** The first checkov run had 36 failures. Three were fixed in code: the metadata hop limit
+is now 1, the VPC's default security group is taken over and left empty, and the state bucket expires old
+versions after 90 days. tflint's 15 warnings were all one problem, no version constraints in the modules, and
+are fixed by a `versions.tf` in every module (loose lower bounds; the environments pin the provider range and
+the lock file pins the exact version). The rest are accepted findings. Applied and checked: the state
+bucket's lifecycle rule is live (old versions expire after 90 days, delete markers are cleaned up, incomplete
+uploads after 7), and the VPC's default security group has no ingress and no egress rules.
+
+### Accepted findings
+
+A finding that is knowingly accepted gets an inline `#checkov:skip=ID:reason` comment next to the resource
+and a line here, so the reason is next to the code and also in one list.
+
+| Check | Where | Why it is accepted |
+|-------|-------|--------------------|
+| `CKV_AWS_2`, `CKV_AWS_103` | ALB HTTP listener | HTTP only until a domain exists to get a certificate for, so there is no TLS policy to set. See [HTTP only for now](#http-only-for-now) |
+| `CKV2_AWS_20` | ALB | There is nothing to redirect to without HTTPS |
+| `CKV_AWS_378` | both target groups | Traffic from the load balancer to the instances stays inside the VPC |
+| `CKV_AWS_260` | `alb_http` security group rule | The load balancer is the public entry point, open to `alb_ingress_cidrs` (the internet by default) |
+| `CKV_AWS_260` | `app_frontend_from_alb` rule | False positive: the source is the load balancer's security group, not an IP range |
+| `CKV2_AWS_28` | ALB | A web application firewall costs extra and is out of scope |
+| `CKV2_AWS_11` | VPC | Flow logs cost extra and are out of scope |
+| `CKV_AWS_150` | ALB | Deletion protection is the `deletion_protection` variable: off in staging so it can be destroyed, on in production |
+| `CKV_AWS_293` | database | Same variable as above |
+| `CKV_AWS_157` | database | Multi-AZ is the `db_multi_az` variable: off in staging to save cost, on in production |
+| `CKV_AWS_145` | state bucket and ALB log bucket | SSE-S3 (AES256) is free, and load balancer access logs support SSE-S3 only, not KMS |
+| `CKV_AWS_136` | ECR repositories | AES256 (the ECR default) is free; a customer-managed key adds cost and key management |
+| `CKV_AWS_158` | database log groups | CloudWatch Logs encrypts at rest by default; a customer-managed key adds cost |
+| `CKV_AWS_354` | database | Performance Insights uses the default AWS-managed key |
+| `CKV_AWS_149` | JWT secret | The secret uses the default AWS-managed Secrets Manager key |
+| `CKV_AWS_338` | database log groups | Retention is a per-environment variable (14 days staging, 90 days prod); a year costs more than it is worth here |
+| `CKV_AWS_144` | state bucket and ALB log bucket | One region is enough, and replication would add cost |
+| `CKV_AWS_18` | state bucket and ALB log bucket | Access logging needs another bucket to hold the logs |
+| `CKV_AWS_21` | ALB log bucket | The logs expire, and versioning would keep deleted versions and add cost. (The state bucket is versioned.) |
+| `CKV2_AWS_62` | state bucket and ALB log bucket | There is no consumer for bucket event notifications |
+| `CKV_AWS_161` | database | The application signs in with the managed password; IAM database authentication would need application changes |
+| `CKV2_AWS_57` | JWT secret | Automatic rotation would sign out every logged-in user; the key is rotated deliberately by increasing `secret_version` |
+| `CKV2_AWS_5` | the three security groups | checkov scans each module on its own; the groups are attached in the load balancer, compute and rds modules |
+| `CKV_AWS_394` | availability zone lookup | Only the first `az_count` names are used, and a zone added later sorts last, so the chosen zones do not change |
+
+**trivy** is used as a second opinion and is not a gate, so its findings are not suppressed twice. It reports 13
+distinct findings, all in the same categories as the table (plain HTTP, customer-managed keys, versioning,
+logging, flow logs, deletion protection, IAM authentication). One has no checkov equivalent: `AWS-0104` calls
+the `app` group's outbound HTTPS rule to `0.0.0.0/0` critical. That rule is how the instances reach ECR, SSM and
+Secrets Manager through the NAT gateway, and replacing it would need interface endpoints, which cost about $95
+a month (see [VPC endpoints](#vpc-endpoints)).
+
+### Secrets in the repository
+
+gitleaks finds 4 secrets in the git history. All are in the first commit, the unmodified import of the upstream
+app: the JWT key in `app/docker-compose.yml` and in the upstream README (twice), and a token in
+`app/backend/README.md`. The history cannot be rewritten
+without breaking the "unmodified import" commit, so `.gitleaks-baseline.json` records exactly those 4
+findings, with the values redacted, and a scan against it reports only new leaks. Treat the upstream JWT key
+and the database password `1234` as public: they must never be used in AWS, and step 2.1 removes them from
+the compose file. A scan of the working tree also flags the local `app/.env`. That file is git-ignored, was
+never committed, and the hooks and CI do not scan it.
 
 ## Credits
 
