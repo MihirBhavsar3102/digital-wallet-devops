@@ -18,8 +18,9 @@ locals {
 data "aws_caller_identity" "current" {}
 
 # Modules get added here one at a time, bottom-up (network first):
-# module "network" {
-#   source      = "../../modules/network"
-#   name_prefix = local.name_prefix
-#   vpc_cidr    = var.vpc_cidr
-# }
+module "network" {
+  source             = "../../modules/network"
+  name_prefix        = local.name_prefix
+  vpc_cidr           = var.vpc_cidr
+  single_nat_gateway = true # staging: one shared NAT, cheaper but a single point of failure (see README)
+}
