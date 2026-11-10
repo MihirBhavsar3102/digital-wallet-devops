@@ -261,6 +261,12 @@ the placeholder container was running, Docker, Compose, the AWS CLI and the Clou
 installed, `deploy.sh` was in place (mode 750, owned by root), an unauthenticated metadata request
 returned `401`, no key pair was attached, and the volumes were encrypted gp3.
 
+The **metadata hop limit of 1** was checked on the replacement instance (EC2 reports hop limit 1 and tokens
+required). From the host, a token request returns `200`. From a container on the default bridge network the
+same request gets no answer, while the same container on the host network gets `200`, so it is the hop limit
+that blocks it. The instance also has no way to read other secrets: `secretsmanager:ListSecrets` and
+reading a secret that is not on its list are both `AccessDenied`.
+
 ### Ubuntu package updates over HTTPS
 
 Ubuntu's own apt mirrors are configured with plain `http://` (port 80), but the `app` security group only
@@ -494,6 +500,22 @@ secrets: the database password is created by RDS and the JWT secret by Terraform
 variable. They are what makes the environments differ, and CI needs them. `terraform.tfvars.example` is the
 template for a new environment. Anything personal or secret goes in a `local.tfvars`, which git ignores.
 
+### Checked on staging
+
+Applying this change to staging did what the saved plan said (4 to add, 5 to change, 1 to destroy). It
+created the JWT secret and the VPC's empty default security group, replaced the instance
+role's secrets policy, cut log retention to 14 days, and resized the Auto Scaling group to 1 / 1 / 2. The
+rolling refresh then replaced the instances, which took about six minutes. With a single instance the
+placeholder app is briefly unavailable during a refresh; that gap was not measured. The database, the load
+balancer and the network were not touched.
+
+Afterwards `terraform plan` reported `No changes`, both target groups showed the new instance healthy, and
+the load balancer answered with the placeholder page and `200` on `/api`. The database was still `available`,
+single-AZ, with 1 day of backups. The variable validation was exercised with six bad values, and each was
+refused before any AWS call: `log_retention_days = 10`, a backend port equal to the frontend port, a desired
+size above the maximum, `alb_ingress_cidrs = ["not-a-cidr"]`, `instance_type = "t4g.small"`, and an
+`extra_tags` map that contains `owner`.
+
 ### Cost, and running production at staging size
 
 In Mumbai (AWS price list API) a NAT gateway is $0.056 per hour, the load balancer $0.0239, a `t3.small`
@@ -527,6 +549,9 @@ CloudWatch Logs accepts.
   validation rejects those keys.
 - **No variable holds a secret.** A variable that did would have to be declared `sensitive = true`.
 
+Checked on staging: `terraform output` prints 18 outputs. None is marked sensitive, none looks like a key or a
+password, and neither the JWT key nor any database password value appears in the outputs or in the state.
+
 The outputs are the same in both environments and are all descriptions, names and ARNs, never a secret value:
 the load balancer DNS name, the VPC ID, the subnet IDs per tier, the three security group IDs, the Auto
 Scaling group name, the ECR repository URLs, the database endpoint, the database secret's ARN and the JWT
@@ -550,6 +575,10 @@ The backend signs its tokens with a JWT key. `infra/modules/secrets/` creates a 
 - **Recovery window:** 30 days with deletion protection on (prod), none otherwise (staging).
 - **Reading it:** the instance role can read exactly this secret and the database secret, nothing else. The
   output is its ARN.
+- **Checked on staging.** The secret holds a 64 character value in AWS. That value is in neither the Terraform
+  state nor the outputs (searched for it directly). The state holds only `has_secret_string_wo = true` for
+  the version resource, and `password` is also `null` for the database. The instance role read both
+  secrets, and was refused everything else.
 - The JWT key in `app/docker-compose.yml` is the upstream project's demo value and is public. It must never be
   used in AWS, and the pipeline step removes it from the compose file.
 
@@ -591,7 +620,9 @@ scans only the staged changes. It needs `terraform`, `tflint` and `gitleaks` on 
 is now 1, the VPC's default security group is taken over and left empty, and the state bucket expires old
 versions after 90 days. tflint's 15 warnings were all one problem, no version constraints in the modules, and
 are fixed by a `versions.tf` in every module (loose lower bounds; the environments pin the provider range and
-the lock file pins the exact version). The rest are accepted findings.
+the lock file pins the exact version). The rest are accepted findings. Applied and checked: the state
+bucket's lifecycle rule is live (old versions expire after 90 days, delete markers are cleaned up, incomplete
+uploads after 7), and the VPC's default security group has no ingress and no egress rules.
 
 ### Accepted findings
 
