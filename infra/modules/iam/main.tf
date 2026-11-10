@@ -53,10 +53,9 @@ resource "aws_iam_role_policy" "ecr_pull" {
 
 data "aws_iam_policy_document" "db_secret" {
   statement {
-    sid     = "ReadDatabaseSecret"
-    actions = ["secretsmanager:GetSecretValue"]
-    # Secrets Manager appends "-" and six random characters to a secret's ARN.
-    resources = ["arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:${var.db_secret_name}-??????"]
+    sid       = "ReadDatabaseSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [var.db_secret_arn] # the exact ARN, so this is the one secret and nothing else
   }
 }
 
