@@ -17,9 +17,9 @@ locals {
 # Smoke test: proves credentials + backend work. Delete once real modules exist.
 data "aws_caller_identity" "current" {}
 
-# Modules get added here one at a time, bottom-up (network first):
-# module "network" {
-#   source      = "../../modules/network"
-#   name_prefix = local.name_prefix
-#   vpc_cidr    = var.vpc_cidr
-# }
+module "network" {
+  source             = "../../modules/network"
+  name_prefix        = local.name_prefix
+  vpc_cidr           = var.vpc_cidr
+  single_nat_gateway = false # prod: one NAT gateway per AZ, so one AZ failing doesn't cut outbound access
+}
