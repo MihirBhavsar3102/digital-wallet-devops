@@ -4,7 +4,8 @@ A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app an
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
 > **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR,
-> IAM, compute, the load balancer and the database are in place. The pipeline and monitoring are not written yet.
+> IAM, compute, the load balancer, the database and the staging/production variables are in place. The
+> pipeline and monitoring are not written yet.
 
 ## Terraform state
 
@@ -34,8 +35,9 @@ must outlive any single environment.
 
 ## Network
 
-`infra/modules/network/` builds one VPC per environment, spread over two Availability Zones (the
-first two available in the region, `ap-south-1a` and `ap-south-1b`). The VPC CIDR is a variable
+`infra/modules/network/` builds one VPC per environment, spread over two or three Availability Zones
+(`az_count`, default 2): the first ones available in the region, `ap-south-1a` and `ap-south-1b` by
+default. The VPC CIDR is a variable
 (`10.10.0.0/16` for staging, `10.20.0.0/16` for prod). DNS support and DNS hostnames are on.
 `cidrsubnet()` carves six /24 subnets in three tiers, leaving gaps between the tiers for later growth:
 
@@ -85,7 +87,7 @@ two AZs, and they are not needed on the happy path.
 
 | Group | Inbound | Outbound | Why |
 |-------|---------|----------|-----|
-| `alb` | TCP 80 from `0.0.0.0/0` (443 is added when HTTPS is) | Only to the `app` group on the app ports | The single public entry point |
+| `alb` | TCP 80 from the CIDRs in `alb_ingress_cidrs` (default `0.0.0.0/0`; 443 is added when HTTPS is) | Only to the `app` group on the app ports | The single public entry point |
 | `app` | Frontend and backend ports from the `alb` group only | 443 to the internet through NAT (ECR, SSM, CloudWatch, Secrets Manager); 5432 to the `db` group | No public ingress and no SSH |
 | `db` | TCP 5432 from the `app` group only | None | Database reachable only from the app tier |
 
@@ -97,8 +99,9 @@ two AZs, and they are not needed on the happy path.
   other. A staging check found 8 rules across the three groups, none without a description.
 - **The `db` group has no egress rule at all.** Terraform removes the allow-all egress rule that AWS
   adds to new groups, and none is added back.
-- The frontend port defaults to 80 and the backend port to 8081, as in `app/docker-compose.yml`.
-  Both are module variables.
+- The frontend port defaults to 80 and the backend port to 8081, as in `app/docker-compose.yml`. Each
+  environment sets them once, and the same two variables are passed to the security groups, the load
+  balancer and the instance placeholder, so they cannot drift apart.
 
 ### No SSH: access goes through SSM
 
@@ -138,7 +141,7 @@ privilege, with no wildcard on anything that supports resource-level permissions
 | `CloudWatchAgentServerPolicy` (AWS-managed) | CloudWatch agent metrics and logs |
 | ECR pull: `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability` | This environment's two repositories only |
 | `ecr:GetAuthorizationToken` | `*`, because AWS does not support scoping this action to a resource |
-| `secretsmanager:GetSecretValue` | The RDS-managed master user secret only, by its exact ARN |
+| `secretsmanager:GetSecretValue` | The RDS-managed database secret and the [JWT secret](#jwt-secret) only, by exact ARN |
 
 ### GitHub Actions deploy roles (OIDC)
 
@@ -177,8 +180,9 @@ useless to anyone but a job from this repository and environment.
 - The RDS instance identifier must be `<name_prefix>-db`, and pre-deploy snapshots must be named
   `<name_prefix>-<anything>`, to match the prod snapshot permission. The [database](#database-rds-postgresql)
   module follows the identifier rule, and names the prod final snapshot `<name_prefix>-final`.
-- The instance role reads the database secret by its exact ARN, passed in from the RDS module. RDS
-  chooses the secret's name itself (`rds!db-<id>`), so a naming convention could not have worked.
+- The instance role reads two secrets, the database secret and the JWT secret, by exact ARN, passed in
+  from the RDS and secrets modules. RDS chooses the database secret's name itself (`rds!db-<id>`), so a
+  naming convention could not have worked.
 - Instances must carry the tag `environment=<env>` or the deploy role cannot run commands on them.
   Provider `default_tags` are not applied to instances launched by an Auto Scaling group, so the
   [compute module](#compute) sets the tag on the group with propagation. Checked on staging: both
@@ -201,7 +205,10 @@ through the [load balancer](#load-balancer-alb).
   because the image is amd64, and validation rejects Graviton types such as `t4g`.
 - **IAM:** the [instance profile](#ec2-instance-role) from the IAM module.
 - **IMDSv2 is required** (`http_tokens = "required"`), so the metadata service refuses unauthenticated
-  requests. The hop limit is 2, so containers can reach the instance's credentials.
+  requests. The **hop limit is 1**, so containers cannot reach the metadata service or the instance
+  role's credentials. `deploy.sh` runs on the host and passes secrets in as environment variables, so no
+  container needs AWS credentials. It was 2 at first; raise it only if a container ever has to call AWS
+  with the instance role.
 - **Storage:** a 20 GiB gp3 root volume with encryption on.
 - **No key pair.** There is no SSH, as described under [security groups](#no-ssh-access-goes-through-ssm).
 
@@ -215,7 +222,7 @@ A short `user_data` script runs once per instance and:
    agent (its configuration is added in the monitoring step);
 4. creates `/opt/app/` containing `instance.env` (region, account ID, name prefix) and `deploy.sh`, a copy
    of `scripts/deploy.sh`, which is still a skeleton until the pipeline step;
-5. starts a **placeholder** nginx container on ports 80 and 8081, so load balancer health checks pass
+5. starts a **placeholder** nginx container on the frontend and backend ports (80 and 8081), so load balancer health checks pass
    before the first real deploy. Its page shows which instance answered, and `/api` returns 200. The
    image comes from the public ECR mirror of nginx, which avoids Docker Hub's pull rate limits.
 
@@ -224,7 +231,8 @@ containers, because both use ports 80 and 8081.
 
 ### Auto Scaling group
 
-- Minimum 1, desired 2 and maximum 3 instances.
+- Minimum, desired and maximum sizes are variables: staging runs 1 / 1 / 2 instances and production
+  2 / 2 / 3.
 - Health check type `ELB` with a 300 second grace period, which covers the `user_data` install.
   An instance that fails the load balancer's health check is replaced.
 - Rolling instance refresh, keeping at least 50% of capacity healthy. The group references
@@ -266,11 +274,15 @@ use HTTPS.
 first `apt-get update`. The security group stays HTTPS-only, and no port 80 rule is added. A missing or
 renamed sources file on a future image does not abort the boot.
 
-The change was tested on a running staging instance by switching a copy of the source files in a throwaway
-directory: `apt-get update` fetched 35.8 MB over HTTPS and exited 0, and `postgresql-client` became
-visible. It takes effect on instances launched after the launch template change is applied, because the
-rolling instance refresh then replaces the running instances one at a time. Instances launched before that
-still have the problem.
+The mechanism was first tested on a running staging instance, by switching a copy of the source files in a
+throwaway directory. After the change was applied, the rolling instance refresh replaced both staging
+instances, and on each new instance:
+
+- the apt sources were `https://`, and the first-boot log had no `Failed to fetch` or `index files failed`
+  lines (before the fix it had 10 matching lines) and 49 successful HTTPS fetches from Ubuntu's mirrors;
+- `apt-get update` exited 0, and a simulated `apt-get install postgresql-client` resolved from Ubuntu's mirrors;
+- `unattended-upgrade --dry-run` fetched the pending security updates;
+- the placeholder, Docker, the AWS CLI, the CloudWatch agent and the database connection all still worked.
 
 ### Image updates
 
@@ -415,9 +427,10 @@ The instance was `available` with the settings above, on the two private-db subn
 to `digital_wallet` over TLS. From the laptop the name resolved to a private address (`10.10.21.112`) and a
 connection to port 5432 failed. Both log groups existed with 30 day retention.
 
-Application instances have no `psql` installed. Once the
-[apt-over-HTTPS fix](#ubuntu-package-updates-over-https) is applied, `postgresql-client` can be installed
-with `apt`. A container works either way:
+Application instances have no `psql` installed. With the
+[apt-over-HTTPS fix](#ubuntu-package-updates-over-https), a simulated `apt-get install postgresql-client`
+resolves from Ubuntu's mirrors (it installs client version 18, which can talk to the version 17 server).
+A container works either way:
 
 ```
 PW=$(aws secretsmanager get-secret-value --secret-id <secret-arn> --query SecretString --output text \
@@ -432,6 +445,113 @@ In Mumbai (AWS price list, published 2026-10-29) `db.t4g.micro` is $0.021 per ho
 Multi-AZ, and gp3 storage is $0.131 per GB-month single-AZ and $0.262 Multi-AZ, so 20 GiB is $2.62 or $5.24 a
 month. Staging has no deletion protection and no final snapshot, so destroying it deletes the data. Production
 needs deletion protection turned off before it can be destroyed.
+
+## Environments: staging and production
+
+`infra/envs/staging/` and `infra/envs/prod/` call the same modules. Their `main.tf`, `variables.tf`,
+`outputs.tf` and `versions.tf` are **byte-identical**, and no module code is copied between them. Checked
+with `diff -rq --exclude=.terraform infra/envs/staging infra/envs/prod`, which reports only three
+differences:
+
+- `backend.tf`, which differs in one line, the state key (`staging/terraform.tfstate` and `prod/terraform.tfstate`);
+- `staging.tfvars` and `prod.tfvars`, which hold every per-environment value.
+
+Everything that makes the environments differ is therefore in two small files, and a reviewer can compare
+them side by side:
+
+| Setting | Staging | Prod |
+|---------|---------|------|
+| VPC CIDR | `10.10.0.0/16` | `10.20.0.0/16` |
+| NAT gateways | single, shared | one per AZ |
+| RDS Multi-AZ | off | on |
+| Backup retention | 1 day | 7 days |
+| Deletion protection and final snapshot | off | on (final snapshot `<name_prefix>-final`) |
+| App instances (min / desired / max) | 1 / 1 / 2 | 2 / 2 / 3 |
+| Log retention | 14 days | 90 days |
+| Deploy role may snapshot the database | no | yes |
+
+`deletion_protection` is a single switch. It protects the database and the load balancer, makes the database
+take a final snapshot, keeps the access log bucket when the environment is destroyed, and gives the secrets
+a 30 day recovery window. Turned off, the environment can be destroyed cleanly.
+
+```
+cd infra/envs/staging
+terraform init
+terraform plan  "-var-file=staging.tfvars"
+terraform apply "-var-file=staging.tfvars"
+```
+
+(The quotes matter in PowerShell.) Terraform 1.11 or later is required, because the JWT secret uses a
+write-only argument.
+
+**Why separate directories and not workspaces.** Workspaces could replace the two folders, but separate
+directories are more explicit: each environment has its own state key and its own reviewable values, and
+there is no chance of applying to the wrong workspace. The cost is four duplicated files, which the `diff`
+above keeps honest.
+
+**The two tfvars files are committed on purpose**, although other `*.tfvars` files are git-ignored. They hold no
+secrets: the database password is created by RDS and the JWT secret by Terraform, and neither is ever a
+variable. They are what makes the environments differ, and CI needs them. `terraform.tfvars.example` is the
+template for a new environment. Anything personal or secret goes in a `local.tfvars`, which git ignores.
+
+### Cost, and running production at staging size
+
+In Mumbai (AWS price list API) a NAT gateway is $0.056 per hour, the load balancer $0.0239, a `t3.small`
+instance $0.0224, and `db.t4g.micro` $0.021 single-AZ or $0.042 Multi-AZ. Running 24 hours a day, and
+leaving out storage, data processing, load balancer capacity units and logs, that is roughly:
+
+| | Staging | Prod |
+|---|---------|------|
+| Estimate per month | about $94 (1 NAT and address, load balancer, 1 instance, single-AZ database) | about $170 (2 NATs and addresses, load balancer, 2 instances, Multi-AZ database) |
+
+Production is configured for resilience and is only applied when it is needed, for example for a demo. If
+that is too expensive, run it at staging size by setting `single_nat_gateway = true`, `db_multi_az = false` and
+`asg_min_size` and `asg_desired_capacity` to 1 in `prod.tfvars`. Nothing else changes, but the resilience
+described above is then not in place.
+
+## Variables and outputs
+
+Every variable has a type and a description, and a validation where a mistake is likely: the environment
+name, CIDR blocks, instance and database class formats, port ranges (the two ports must differ), the
+Auto Scaling sizes (desired between minimum and maximum), and `log_retention_days`, which must be a value
+CloudWatch Logs accepts.
+
+- **Set per environment, with no default**, so each environment has to decide: `environment`, `aws_region`,
+  `owner`, `vpc_cidr`, `single_nat_gateway`, the three Auto Scaling sizes, `db_multi_az`,
+  `db_backup_retention_period`, `deletion_protection`, `allow_db_snapshot` and `log_retention_days`.
+- **With a default shared by both**: `project`, `github_repository`, `az_count`, `alb_ingress_cidrs`, the two ports
+  and two health check paths, `instance_type`, `db_name`, `db_instance_class`, `db_allocated_storage`,
+  `db_engine_version` and `extra_tags`.
+- **Tags.** The provider's `default_tags` are the four standard tags (`project`, `environment`, `managed-by`,
+  `owner`) plus `extra_tags`. The standard tags are merged last, so `extra_tags` can never override them, and
+  validation rejects those keys.
+- **No variable holds a secret.** A variable that did would have to be declared `sensitive = true`.
+
+The outputs are the same in both environments and are all descriptions, names and ARNs, never a secret value:
+the load balancer DNS name, the VPC ID, the subnet IDs per tier, the three security group IDs, the Auto
+Scaling group name, the ECR repository URLs, the database endpoint, the database secret's ARN and the JWT
+secret's ARN, the database log group names, the access log bucket, and the GitHub deploy role ARN. The state
+bucket's name is an output of `infra/bootstrap/`, where the bucket is created.
+
+Not written yet, because the monitoring module does not exist: the `alarm_email` variable, and the SNS topic
+and dashboard outputs. They are added with the monitoring step.
+
+## JWT secret
+
+The backend signs its tokens with a JWT key. `infra/modules/secrets/` creates a Secrets Manager secret,
+`<name_prefix>-jwt-secret`, and fills it with a 64 character random value that AWS generates.
+
+- **The value never enters Terraform state or plan output.** It comes from an *ephemeral* resource
+  (`aws_secretsmanager_random_password`), which exists only while Terraform runs, and is written through a
+  write-only argument (`secret_string_wo`), which Terraform never stores. This needs Terraform 1.11 or later.
+  The alternative, `random_password`, would have put the value in state.
+- **Rotation is deliberate.** Increase the module's `secret_version` to generate and store a new value. That
+  signs out every logged-in user, so it is not automatic.
+- **Recovery window:** 30 days with deletion protection on (prod), none otherwise (staging).
+- **Reading it:** the instance role can read exactly this secret and the database secret, nothing else. The
+  output is its ARN.
+- The JWT key in `app/docker-compose.yml` is the upstream project's demo value and is public. It must never be
+  used in AWS, and the pipeline step removes it from the compose file.
 
 ## Repo layout
 
