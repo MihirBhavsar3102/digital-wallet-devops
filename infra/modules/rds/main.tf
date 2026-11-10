@@ -22,7 +22,11 @@ resource "aws_db_parameter_group" "this" {
 
   parameter {
     name  = "rds.force_ssl"
-    value = "1" # already the default on 17 and 18; explicit so it stays visible and cannot drift
+    value = "1" # already the default on 17 and 18; explicit so it stays visible
+    # AWS stores this default-valued parameter as pending-reboot and will not change its apply
+    # method without changing its value (see the provider docs). With the provider's default of
+    # "immediate", every plan showed a diff that could never be applied away.
+    apply_method = "pending-reboot"
   }
 
   lifecycle {
