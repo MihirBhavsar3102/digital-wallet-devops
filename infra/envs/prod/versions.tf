@@ -1,5 +1,6 @@
 terraform {
-  required_version = "~> 1.10"
+  # 1.11 is needed for write-only arguments, which keep the JWT secret out of state.
+  required_version = "~> 1.11"
   required_providers {
     aws = {
       source  = "hashicorp/aws"

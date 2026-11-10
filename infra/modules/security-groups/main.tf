@@ -19,12 +19,19 @@ resource "aws_security_group" "db" {
 
 # ---- alb
 resource "aws_vpc_security_group_ingress_rule" "alb_http" {
+  for_each          = toset(var.alb_ingress_cidrs)
   security_group_id = aws_security_group.alb.id
-  description       = "HTTP from the internet"
+  description       = each.value == "0.0.0.0/0" ? "HTTP from the internet" : "HTTP from ${each.value}"
   ip_protocol       = "tcp"
   from_port         = 80
   to_port           = 80
-  cidr_ipv4         = "0.0.0.0/0"
+  cidr_ipv4         = each.value
+}
+
+# The rule used to be a single resource; this keeps it instead of recreating it.
+moved {
+  from = aws_vpc_security_group_ingress_rule.alb_http
+  to   = aws_vpc_security_group_ingress_rule.alb_http["0.0.0.0/0"]
 }
 resource "aws_vpc_security_group_egress_rule" "alb_to_app_frontend" {
   security_group_id            = aws_security_group.alb.id

@@ -51,18 +51,23 @@ resource "aws_iam_role_policy" "ecr_pull" {
   policy = data.aws_iam_policy_document.ecr_pull.json
 }
 
-data "aws_iam_policy_document" "db_secret" {
+data "aws_iam_policy_document" "app_secrets" {
   statement {
-    sid       = "ReadDatabaseSecret"
+    sid       = "ReadAppSecrets"
     actions   = ["secretsmanager:GetSecretValue"]
-    resources = [var.db_secret_arn] # the exact ARN, so this is the one secret and nothing else
+    resources = var.secret_arns # exact ARNs, so only these secrets and nothing else
   }
 }
 
-resource "aws_iam_role_policy" "db_secret" {
-  name   = "read-db-secret"
+moved {
+  from = aws_iam_role_policy.db_secret
+  to   = aws_iam_role_policy.app_secrets
+}
+
+resource "aws_iam_role_policy" "app_secrets" {
+  name   = "read-app-secrets"
   role   = aws_iam_role.ec2.id
-  policy = data.aws_iam_policy_document.db_secret.json
+  policy = data.aws_iam_policy_document.app_secrets.json
 }
 
 resource "aws_iam_instance_profile" "ec2" {

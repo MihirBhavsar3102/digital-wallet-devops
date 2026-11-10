@@ -62,6 +62,26 @@ variable "health_check_grace_period" {
   default     = 300
 }
 
+variable "frontend_port" {
+  type        = number
+  description = "Port the placeholder (and later the frontend) listens on. Must match the load balancer and security group modules."
+  default     = 80
+  validation {
+    condition     = var.frontend_port >= 1 && var.frontend_port <= 65535
+    error_message = "frontend_port must be between 1 and 65535."
+  }
+}
+
+variable "backend_port" {
+  type        = number
+  description = "Port the placeholder (and later the backend) listens on. Must match the load balancer and security group modules."
+  default     = 8081
+  validation {
+    condition     = var.backend_port >= 1 && var.backend_port <= 65535
+    error_message = "backend_port must be between 1 and 65535."
+  }
+}
+
 variable "target_group_arns" {
   type        = list(string)
   description = "Target groups to register instances with. Empty until the load balancer exists."

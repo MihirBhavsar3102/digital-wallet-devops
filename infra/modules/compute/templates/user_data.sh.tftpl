@@ -54,8 +54,8 @@ HTML_EOF
 
 cat > /opt/app/placeholder/default.conf <<'CONF_EOF'
 server {
-  listen 80;
-  listen 8081;
+  listen ${frontend_port};
+  listen ${backend_port};
   root /usr/share/nginx/html;
   location /api { default_type text/plain; return 200 'placeholder ok'; }
   location / { try_files $uri /index.html; }
@@ -63,7 +63,7 @@ server {
 CONF_EOF
 
 docker run -d --name placeholder --restart unless-stopped \
-  -p 80:80 -p 8081:8081 \
+  -p ${frontend_port}:${frontend_port} -p ${backend_port}:${backend_port} \
   -v /opt/app/placeholder/default.conf:/etc/nginx/conf.d/default.conf:ro \
   -v /opt/app/placeholder/index.html:/usr/share/nginx/html/index.html:ro \
   public.ecr.aws/nginx/nginx:stable-alpine

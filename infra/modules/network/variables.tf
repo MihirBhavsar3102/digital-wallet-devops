@@ -15,6 +15,16 @@ variable "vpc_cidr" {
   }
 }
 
+variable "az_count" {
+  type        = number
+  description = "Number of Availability Zones to use. Each gets a public, a private-app and a private-db subnet."
+  default     = 2
+  validation {
+    condition     = contains([2, 3], var.az_count)
+    error_message = "az_count must be 2 or 3."
+  }
+}
+
 variable "single_nat_gateway" {
   type        = bool
   description = "true: one shared NAT gateway (cheaper, single point of failure). false: one NAT gateway per AZ."
