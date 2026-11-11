@@ -7,10 +7,11 @@ import { AccountsModule } from './accounts/accounts.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { AuthModule } from './auth/auth.module';
 import { AuthGuard } from './auth/auth.guard';
+import { HealthController } from './health/health.controller';
 
 @Module({
   imports: [UsersModule, AccountsModule, TransactionsModule, AuthModule],
-  controllers: [AppController],
+  controllers: [AppController, HealthController],
   providers: [
     AppService,
     {
