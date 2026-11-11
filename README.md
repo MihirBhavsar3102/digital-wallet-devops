@@ -913,6 +913,10 @@ pull request passes through the same checks as any other.
   release line) needs a decision and usually code changes, and inside the weekly pull request it would fail CI
   and hold the routine updates back with it. Upgrade them by hand when you choose to; `npm outdated` in
   `app/backend` and `app/frontend` lists them.
+- **Prisma is excluded too.** `prisma` and `@prisma/client` are held at 6.0.1 on purpose (see
+  [Engine version](#engine-version)). The first weekly pull request proposed 6.0.1 to 6.19.3, which pulls in
+  `deepmerge-ts` 7.1.5 (CVE-2026-40345, HIGH, fixed only in 8.0.0), so CI blocked it. Upgrade Prisma as its own
+  tested change, then remove the two `ignore` entries for it.
 - **Security updates are separate.** GitHub opens those on its own when an advisory appears, so an urgent fix
   does not wait for Monday or ride along with an update that might fail. They are not controlled by this file.
 - **Why it was changed.** The first version grouped only minor and patch updates inside each npm folder. Every
