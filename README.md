@@ -125,6 +125,12 @@ from the internet to administer them.
   and key management.
 - **Lifecycle policy:** keeps the last 10 images in each repository (the `keep_last_images` module
   variable) and expires older ones.
+- **Deleting a repository that holds images.** AWS refuses to, so without `force_delete` a
+  `terraform destroy` stops with an error on the repositories once an image has been pushed. The module takes
+  a required `force_delete` variable, and each environment sets it to `!deletion_protection`: staging deletes
+  its images together with the repositories, and production keeps them (its repositories must be emptied on
+  purpose before they can be destroyed). Staging was changed in place, with no image touched, because
+  `terraform destroy` acts on the stored state, so the setting has to be applied before it helps.
 
 ## Identity and access (IAM)
 
@@ -478,8 +484,9 @@ them side by side:
 | Deploy role may snapshot the database | no | yes |
 
 `deletion_protection` is a single switch. It protects the database and the load balancer, makes the database
-take a final snapshot, keeps the access log bucket when the environment is destroyed, and gives the secrets
-a 30 day recovery window. Turned off, the environment can be destroyed cleanly.
+take a final snapshot, keeps the access log bucket and the images in the ECR repositories when the
+environment is destroyed, and gives the secrets a 30 day recovery window. Turned off, the environment can be
+destroyed cleanly.
 
 ```
 cd infra/envs/staging

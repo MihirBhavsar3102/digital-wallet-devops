@@ -28,6 +28,6 @@ db_multi_az                = false
 db_backup_retention_period = 1
 
 # protection and retention
-deletion_protection = false # also: no final snapshot, access log bucket can be emptied on destroy
+deletion_protection = false # also: no final snapshot, access log bucket and ECR images are deleted on destroy
 allow_db_snapshot   = false
 log_retention_days  = 14
