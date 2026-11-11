@@ -1,0 +1,322 @@
+name: CI
+
+# Guards pull requests: nothing here deploys. Merging to main is handled by cd.yml (step 2.3).
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only for every job. No job below needs to write to the repository.
+permissions:
+  contents: read
+
+# A new push to the same pull request cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+  # Tool images, pinned by digest so a moved tag cannot change what runs here. The version in the
+  # tag is for humans; the digest is what is pulled. Update them by hand (Dependabot does not read
+  # workflow "docker run" commands): resolve a new digest with `docker buildx imagetools inspect`.
+  HADOLINT_IMAGE: ghcr.io/hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+  SHELLCHECK_IMAGE: koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+  PYTHON_IMAGE: python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+
+jobs:
+  # Decides whether the Terraform checks are needed. This is a job and not a workflow-level "paths"
+  # filter on purpose: a filtered-out workflow never reports its required checks, so the pull request
+  # would wait for them forever, whereas a skipped job counts as passed. This job is a required check
+  # itself, so a failure here cannot silently skip iac-checks.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      infra: ${{ steps.filter.outputs.infra }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "infra=true" >> "$GITHUB_OUTPUT"   # a manual run checks everything
+            exit 0
+          fi
+          if git diff --name-only "$BASE_SHA" "$GITHUB_SHA" | grep -qE '^(infra/|\.tflint\.hcl$|\.checkov\.yaml$|\.github/workflows/ci\.yml$)'; then
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "infra=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            app/backend/package-lock.json
+            app/frontend/package-lock.json
+
+      - name: Backend dependencies
+        working-directory: app/backend
+        run: npm ci
+      - name: Backend lint (eslint, no --fix) and formatting
+        working-directory: app/backend
+        run: |
+          npx eslint "{src,test}/**/*.ts"
+          npx prettier --check "src/**/*.ts" "test/**/*.ts"
+
+      - name: Frontend dependencies
+        working-directory: app/frontend
+        run: npm ci
+      - name: Frontend lint
+        working-directory: app/frontend
+        run: npm run lint
+
+      - name: hadolint on the Dockerfiles
+        run: |
+          status=0
+          for f in app/backend/Dockerfile app/frontend/Dockerfile; do
+            echo "== $f"
+            docker run --rm -i "$HADOLINT_IMAGE" < "$f" || status=1
+          done
+          exit "$status"
+
+      - name: shellcheck on the scripts and their tests
+        run: docker run --rm -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" scripts/*.sh scripts/tests/*.sh
+
+      - name: actionlint on the workflows
+        run: docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color
+
+      - name: The local compose file is valid
+        env:
+          POSTGRES_PASSWORD: lint-only
+          JWT_SECRET_KEY: lint-only
+        run: docker compose -f app/docker-compose.yml config --quiet
+
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/backend/package-lock.json
+      - name: Install
+        working-directory: app/backend
+        run: npm ci
+      - name: Jest with coverage
+        working-directory: app/backend
+        run: npm run test:cov -- --ci
+      - name: Keep the coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-coverage
+          path: app/backend/coverage
+          if-no-files-found: warn
+          retention-days: 14
+
+  integration-tests:
+    name: integration-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: digital_wallet_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d digital_wallet_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # A throwaway database that exists only for this job.
+      DATABASE_URL: postgresql://ci:ci-only@localhost:5432/digital_wallet_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/backend/package-lock.json
+      - name: Install
+        working-directory: app/backend
+        run: npm ci
+      - name: Apply the migrations from scratch
+        working-directory: app/backend
+        run: npx prisma migrate deploy
+      - name: Integration tests against the real database
+        working-directory: app/backend
+        run: npm run test:integration
+
+  dependency-scan:
+    name: dependency-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Day for the vulnerability database cache
+        id: day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Cache the vulnerability database
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.day.outputs.day }}
+          restore-keys: trivy-db-
+      # HIGH and CRITICAL findings in the production dependencies of both lockfiles fail the job.
+      # Development-only packages are not scanned (trivy's default). There is no ignore file: a
+      # finding is fixed, or, if it ever cannot be, listed in .trivyignore with a comment per entry.
+      - name: Scan the dependency lockfiles
+        run: |
+          mkdir -p "$HOME/.cache/trivy"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e TRIVY_CACHE_DIR=/cache -v "$HOME/.cache/trivy:/cache" \
+            -v "$PWD:/src:ro" -w /src \
+            "$TRIVY_IMAGE" fs app \
+            --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --no-progress --skip-version-check
+
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the whole history is scanned
+          persist-credentials: false
+      # .gitleaks-baseline.json records the 4 findings in the unmodified upstream import, so only
+      # new leaks fail the job. See "Secrets in the repository" in the README.
+      - name: gitleaks on the full history
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$PWD:/repo" -w /repo \
+            "$GITLEAKS_IMAGE" git /repo --baseline-path .gitleaks-baseline.json --redact --no-banner
+
+  image-build-scan:
+    name: image-build-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Day for the vulnerability database cache
+        id: day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Cache the vulnerability database
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.day.outputs.day }}
+          restore-keys: trivy-db-
+      - name: Build both images (nothing is pushed)
+        run: |
+          docker build --pull -t digital-wallet-backend:ci app/backend
+          docker build --pull --build-arg VITE_API_BASE_URL=/api -t digital-wallet-frontend:ci app/frontend
+      # HIGH and CRITICAL findings that have a fix fail the job. Findings with no fix available yet
+      # are not actionable, so they are left out (--ignore-unfixed).
+      - name: Scan both images
+        run: |
+          mkdir -p "$HOME/.cache/trivy" "$RUNNER_TEMP/images"
+          status=0
+          for name in backend frontend; do
+            docker save -o "$RUNNER_TEMP/images/$name.tar" "digital-wallet-$name:ci"
+            echo "== $name"
+            docker run --rm --user "$(id -u):$(id -g)" \
+              -e TRIVY_CACHE_DIR=/cache -v "$HOME/.cache/trivy:/cache" \
+              -v "$RUNNER_TEMP/images:/images:ro" \
+              "$TRIVY_IMAGE" image --input "/images/$name.tar" \
+              --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress --skip-version-check || status=1
+          done
+          exit "$status"
+
+  # Only when the Terraform, its tool settings or this workflow changed (see the changes job).
+  iac-checks:
+    name: iac-checks
+    needs: changes
+    if: needs.changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.17.1"
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff infra
+      # -backend=false: validation needs the providers, not the remote state or any AWS credentials.
+      - name: terraform validate
+        run: |
+          for dir in infra/bootstrap infra/envs/staging infra/envs/prod; do
+            echo "== $dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+          done
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.65.0
+          tflint_wrapper: false
+          github_token: ${{ github.token }}
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # avoids the anonymous rate limit when downloading the AWS ruleset
+        run: |
+          tflint --init --config "$PWD/.tflint.hcl"
+          tflint --chdir infra --recursive --config "$PWD/.tflint.hcl"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: checkov
+        run: |
+          pip install --quiet "checkov==3.4.3"
+          checkov
+
+  # The tests for deploy.sh and smoke-test.sh. They need Linux tools, so they run in a container.
+  script-tests:
+    name: script-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: deploy.sh
+        run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/deploy.test.sh
+      - name: smoke-test.sh
+        run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/smoke-test.test.sh
