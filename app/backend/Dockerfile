@@ -34,6 +34,11 @@ RUN npx prisma generate
 
 # ---- runtime
 FROM base AS runtime
+# The app runs as "node dist/main.js" and migrations as node_modules/.bin/prisma, so npm, npx and
+# corepack are never used here. They bring their own dependencies (pacote, sigstore, tar, ...) that
+# the image scanner reports, so they are removed instead of carrying code that is never run.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 ENV NODE_ENV=production \
     PORT=8081
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
