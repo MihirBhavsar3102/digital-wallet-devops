@@ -4,6 +4,16 @@ data "aws_region" "current" {}
 locals {
   account_id = data.aws_caller_identity.current.account_id
   region     = data.aws_region.current.region
+
+  # The subject GitHub puts in the token of a job that runs in the GitHub Environment. Since 15 July
+  # 2026 GitHub issues "immutable" subjects to repositories created after that date: the numeric owner
+  # and repository ids follow the names (repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:NAME). A trust
+  # policy written for the name-only form, repo:OWNER/REPO:environment:NAME, never matches such a
+  # token, and AWS answers "Not authorized to perform sts:AssumeRoleWithWebIdentity". The ids also
+  # mean that a repository deleted and recreated under the same name cannot assume this role.
+  github_owner   = split("/", var.github_repository)[0]
+  github_repo    = split("/", var.github_repository)[1]
+  github_subject = "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}:environment:${var.github_environment}"
 }
 
 #EC2 instance role 
@@ -95,7 +105,7 @@ data "aws_iam_policy_document" "github_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:${var.github_environment}"]
+      values   = [local.github_subject]
     }
   }
 }

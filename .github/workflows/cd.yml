@@ -28,7 +28,7 @@ jobs:
     name: build-and-push
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # The deploy role's trust policy accepts one token subject, repo:<owner>/<repo>:environment:staging,
+    # The deploy role's trust policy accepts one token subject, repo:<owner>@<id>/<repo>@<id>:environment:staging,
     # and the subject only says "environment:staging" if the job declares the environment. Without this
     # line the login to AWS is refused. The values below belong to that GitHub Environment (Settings,
     # Environments, staging, Variables). None of them is a secret: access comes from the role, not a key.

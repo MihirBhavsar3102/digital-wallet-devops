@@ -14,6 +14,22 @@ variable "github_repository" {
     error_message = "github_repository must look like OWNER/REPO."
   }
 }
+variable "github_owner_id" {
+  type        = string
+  description = "Numeric id of the GitHub account that owns the repository. GitHub puts it in the token's subject claim."
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "github_owner_id must be the numeric id, for example 62109840."
+  }
+}
+variable "github_repository_id" {
+  type        = string
+  description = "Numeric id of the GitHub repository. GitHub puts it in the token's subject claim."
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repository_id))
+    error_message = "github_repository_id must be the numeric id, for example 1451854102."
+  }
+}
 variable "github_environment" {
   type        = string
   description = "Name of the GitHub Environment whose jobs may assume the deploy role. Case-sensitive."
