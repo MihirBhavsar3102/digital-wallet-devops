@@ -912,7 +912,7 @@ checks: nothing in it deploys.
 | `secret-scan` | gitleaks on the full history, against `.gitleaks-baseline.json` | a new secret |
 | `image-build-scan` | Builds both images (nothing is pushed) and scans them with trivy, HIGH and CRITICAL that have a fix | any such finding |
 | `iac-checks` | `terraform fmt`, `validate` in `bootstrap`, `staging` and `prod`, tflint and checkov | any of them reports a problem. Runs only when `infra/`, `.tflint.hcl`, `.checkov.yaml` or `ci.yml` changed |
-| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh` and `notify.sh` | a check fails |
+| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh`, `notify.sh` and `rollback-check.sh` | a check fails |
 
 **How it is built.**
 
