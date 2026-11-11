@@ -87,3 +87,30 @@ variable "target_group_arns" {
   description = "Target groups to register instances with. Empty until the load balancer exists."
   default     = []
 }
+
+# ---------- database connection (written to /opt/app/instance.env for deploy.sh) ----------
+# The instance role may only read secrets by exact ARN and cannot look anything up, so these are
+# handed to the instance at launch. None of them is secret: the password lives in the secret.
+variable "db_host" {
+  type        = string
+  description = "DNS name of the database instance. deploy.sh uses it to build DATABASE_URL."
+}
+
+variable "db_port" {
+  type        = number
+  description = "Port the database listens on."
+  validation {
+    condition     = var.db_port >= 1 && var.db_port <= 65535
+    error_message = "db_port must be between 1 and 65535."
+  }
+}
+
+variable "db_name" {
+  type        = string
+  description = "Name of the application database."
+}
+
+variable "db_secret_arn" {
+  type        = string
+  description = "ARN of the Secrets Manager secret with the database master credentials. RDS names it, so the instance cannot derive it."
+}

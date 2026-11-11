@@ -104,4 +104,8 @@ module "compute" {
   frontend_port         = var.frontend_port
   backend_port          = var.backend_port
   target_group_arns     = [module.alb.frontend_target_group_arn, module.alb.backend_target_group_arn]
+  db_host               = module.rds.address
+  db_port               = module.rds.port
+  db_name               = module.rds.db_name
+  db_secret_arn         = module.rds.master_user_secret_arn
 }

@@ -31,10 +31,18 @@ rm -f /tmp/amazon-cloudwatch-agent.deb
 
 # --- /opt/app, instance settings and deploy.sh
 mkdir -p /opt/app/placeholder
+# deploy.sh sources this file. None of the values is secret (the database password stays in
+# Secrets Manager). The ARN contains "!", so the database values are quoted.
 cat > /opt/app/instance.env <<ENV_EOF
 REGION=${region}
 ACCOUNT_ID=${account_id}
 NAME_PREFIX=${name_prefix}
+FRONTEND_PORT=${frontend_port}
+BACKEND_PORT=${backend_port}
+DB_HOST="${db_host}"
+DB_PORT="${db_port}"
+DB_NAME="${db_name}"
+DB_SECRET_ARN="${db_secret_arn}"
 ENV_EOF
 echo "${deploy_script_b64}" | base64 -d > /opt/app/deploy.sh
 chmod 0750 /opt/app/deploy.sh
