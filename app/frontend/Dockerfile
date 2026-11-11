@@ -14,7 +14,7 @@ ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 RUN npm run build
 
 # ---- serve: nginx with our own config
-FROM nginx:1.30.6-alpine
+FROM nginx:1.31.8-alpine
 # The pinned base still carries libxslt 1.1.43-r3, which has two HIGH CVEs fixed in -r4, and the image
 # scan in CI fails on fixable HIGH findings. Upgrade only that package. Remove this line once the
 # base image ships the fixed version (the next nginx tag).
