@@ -1,0 +1,78 @@
+# One pull request a week for all dependency updates, across every ecosystem below. Before this,
+# each package and each major version got its own pull request.
+#
+# - The pull request opens on Monday and holds every minor and patch update (npm, the Dockerfiles,
+#   GitHub Actions and Terraform) together. It goes through the same CI as any other change.
+# - Major versions are left out on purpose. A major bump (a framework, Vite, the Node release line)
+#   needs a decision and usually code changes, and inside the weekly pull request it would fail CI
+#   and hold the routine updates back with it. Upgrade them by hand when you choose to.
+# - Security updates are not part of this: GitHub opens those separately, when an advisory appears,
+#   so an urgent fix does not wait for Monday or ride along with an update that might fail.
+#
+# package.json "overrides" in app/backend pins four transitive packages that NestJS pins to
+# vulnerable versions. Dependabot does not touch overrides: revisit them when NestJS is updated.
+version: 2
+
+multi-ecosystem-groups:
+  weekly:
+    schedule:
+      interval: weekly
+      day: monday
+
+updates:
+  - package-ecosystem: npm
+    directory: /app/backend
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # Prisma is held at 6.0.1 on purpose (see "Engine version" in the README). The first weekly pull
+      # request proposed 6.0.1 to 6.19.3, which pulls in deepmerge-ts 7.1.5 (CVE-2026-40345, HIGH, fixed
+      # only in 8.0.0), so CI rightly blocked it. Upgrade Prisma as its own tested change, then remove
+      # these two entries.
+      - dependency-name: prisma
+      - dependency-name: "@prisma/client"
+
+  - package-ecosystem: npm
+    directory: /app/frontend
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: docker
+    directory: /app/backend
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: docker
+    directory: /app/frontend
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: terraform
+    directories:
+      - /infra/bootstrap
+      - /infra/envs/*
+      - /infra/modules/*
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

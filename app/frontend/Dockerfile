@@ -1,32 +1,24 @@
-# Frontend Dockerfile
-FROM node:20 as build
+# syntax=docker/dockerfile:1
 
-# Set working directory
+# ---- build: Vite bundle
+FROM node:22.23.4-bookworm-slim AS build
 WORKDIR /app
-
-# Copy package.json and package-lock.json
-COPY package*.json ./
-
-# Install dependencies
-RUN npm install
-
-# Copy the application code
+COPY package.json package-lock.json ./
+RUN npm ci
 COPY . .
-
-# Build the frontend
+# Vite bakes VITE_* values into the bundle at build time, so this is a build argument. The
+# relative "/api" lets one image work behind any load balancer hostname: the ALB sends /api/*
+# to the backend. Local compose overrides it with the backend's full URL.
+ARG VITE_API_BASE_URL=/api
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 RUN npm run build
 
-# Stage 2: Serve with NGINX
-FROM nginx:alpine
-
-# Copy built app to NGINX's HTML directory
-COPY --from=build /app/dist /usr/share/nginx/html
-
-# Add a custom NGINX configuration to handle routing
+# ---- serve: nginx with our own config
+FROM nginx:1.31.8-alpine
+# The pinned base still carries libxslt 1.1.43-r3, which has two HIGH CVEs fixed in -r4, and the image
+# scan in CI fails on fixable HIGH findings. Upgrade only that package. Remove this line once the
+# base image ships the fixed version (the next nginx tag).
+RUN apk upgrade --no-cache libxslt
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-# Expose the default NGINX port
+COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
-
-# Start NGINX
-CMD ["nginx", "-g", "daemon off;"]
