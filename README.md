@@ -912,7 +912,7 @@ checks: nothing in it deploys.
 | `secret-scan` | gitleaks on the full history, against `.gitleaks-baseline.json` | a new secret |
 | `image-build-scan` | Builds both images (nothing is pushed) and scans them with trivy, HIGH and CRITICAL that have a fix | any such finding |
 | `iac-checks` | `terraform fmt`, `validate` in `bootstrap`, `staging` and `prod`, tflint and checkov | any of them reports a problem. Runs only when `infra/`, `.tflint.hcl`, `.checkov.yaml` or `ci.yml` changed |
-| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh` and `notify.sh` | a check fails |
+| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh`, `notify.sh` and `rollback-check.sh` | a check fails |
 
 **How it is built.**
 
@@ -991,13 +991,18 @@ the workflow. For example `docker run --rm -i hadolint/hadolint < app/backend/Do
 `trivy fs app --scanners vuln --severity HIGH,CRITICAL`, and `gitleaks git --baseline-path
 .gitleaks-baseline.json`. The Terraform checks are listed under [Quality gates](#quality-gates).
 
-## Continuous delivery: build, push, deploy and promote (steps 2.3 to 2.5)
+## Continuous delivery: build, push, deploy, promote and roll back (steps 2.3 to 2.7)
 
 `.github/workflows/cd.yml` runs when a commit lands on `main`, which is when a pull request is merged
 ([ci.yml](#continuous-integration-pull-requests) has already checked it). It has three jobs, in a chain:
 `build-and-push` (step 2.3), `deploy-staging` (step 2.4, [below](#deploy-to-staging-step-24)) and
 `deploy-production` (step 2.5, [below](#production-step-25)), which waits for a person to approve it.
-The last two use the `tag` output of the first.
+The last two use the `tag` output of the first. A fourth workflow, `rollback.yml`
+([below](#rollback-step-27)), deploys an older release by hand.
+
+The deploy, the smoke test and the record of the last good release are one action, `.github/actions/deploy`,
+used by `deploy-staging`, `deploy-production` and the rollback, so a rollback runs exactly the deploy step a
+release does.
 
 ### Build and push: `build-and-push`
 
@@ -1257,6 +1262,101 @@ deployment. Staging has to be up when production deploys, because that is where 
 first deploy to production finds its repositories empty, which is what the promotion is for. Afterwards, to
 stop paying for production: its ECR repositories keep their images (`deletion_protection`), so empty them first
 or `terraform destroy` stops with an error, and delete the pre-deploy snapshots you no longer need.
+
+### Rollback (step 2.7)
+
+`.github/workflows/rollback.yml` deploys a release that is **already in ECR** to an environment again, normally an
+older one, without building anything. It is run by hand: Actions, Rollback, Run workflow, or
+
+```
+gh workflow run rollback.yml -f environment=staging -f image_tag=3e8bbd8
+```
+
+| Input | |
+|-------|-|
+| `environment` | `staging` or `production` |
+| `image_tag` | the release, as a short commit SHA, such as `3e8bbd8` |
+
+**What it does**, in order, as one job that takes the chosen environment as its GitHub Environment (so that
+environment's variables, the role it assumes and its protection rules all apply):
+
+1. Checks its inputs and that it was started from `main`.
+2. Logs in with the environment's deploy role (OIDC, no stored key).
+3. **Checks that the release is in ECR** (`scripts/rollback-check.sh`, 22 tests): both images have to be in the
+   environment's repositories, because `deploy.sh` pulls both. A release that is not there is refused before any
+   instance is touched, and the message lists the releases that are, newest first. The usual reasons are a typo and
+   a release the lifecycle policy has expired.
+4. Runs the shared deploy action: the instances one at a time, the smoke test through the load balancer, and the
+   record of the release in the SSM parameter `/<name_prefix>/deployed-tag`.
+
+A **production** rollback waits for the reviewer's approval, as a production deploy does, and can only run from
+`main`. A failed rollback sends an e-mail, and a successful production rollback announces which release production
+now runs, as a deploy does ([Pipeline notifications](#pipeline-notifications-step-26)).
+
+#### Finding the last good tag
+
+There are three places to look. The first is the one to trust.
+
+1. **The SSM parameter and its history.** The pipeline writes the parameter only after a release has passed its
+   smoke test, so its history is the list of releases that worked, in order. The current value is what the
+   environment runs now, and the one before it is the previous good release:
+   ```
+   aws ssm get-parameter-history --name /digital-wallet-staging/deployed-tag \
+     --query 'sort_by(Parameters,&LastModifiedDate)[].[LastModifiedDate,Version,Value]' --output text
+   ```
+   Use `/digital-wallet-prod/deployed-tag` for production. (From Git Bash, set `MSYS_NO_PATHCONV=1` first, or the
+   leading `/` is rewritten into a Windows path.) The first value, `none`, is Terraform's.
+2. **ECR: what still exists.** The lifecycle policy keeps the last 10 **images** of each repository, and a rollback
+   can only go to one of them:
+   ```
+   aws ecr describe-images --repository-name digital-wallet-staging-backend \
+     --query 'reverse(sort_by(imageDetails[?imageTags], &imagePushedAt))[].[imagePushedAt, join(`, `, imageTags)]' --output text
+   ```
+   One image can carry many tags. A commit that changes no code, such as a documentation change, builds an
+   identical image, so its tag lands on the existing image: on 2026-11-11 seven tags shared one image. Rolling back
+   between tags of the same image changes nothing; a rollback is only meaningful between different images.
+3. **Run history.** `gh run list --workflow cd.yml --status success` lists the runs that deployed, the run's summary
+   says `Staging runs <tag>`, and the repository's Deployments page lists what each environment was given.
+
+#### What a rollback does not undo
+
+- **Database migrations.** `deploy.sh` runs `prisma migrate deploy` from the image being deployed. An older image has
+  fewer migrations, so it applies nothing, and nothing reverts what a newer one applied. The older code therefore
+  has to work with the newer schema, which is the rule migrations are written to already (the old and the new code
+  have to tolerate each other during a deploy). Data written by the newer version stays. If a migration itself
+  has to be undone, production's pre-deploy snapshot (step 2.5) is the restore point, at the price of the data
+  written since.
+- **The pipeline moving on.** The next merge to `main` deploys the newest release to staging again, and queues a
+  production deploy for approval. To keep a rollback in place, revert the bad commit first, or do not merge until it
+  is fixed.
+- **A deploy that is waiting for approval.** A production rollback shares the `deploy-production` concurrency group
+  with `cd.yml`'s production job, so that they never overlap. A run of `cd.yml` that is waiting for its approval may
+  hold that group, and then the rollback queues behind it: cancel or reject that run first. This one is not
+  verified, because production has not been applied.
+
+#### Decisions
+
+- **A workflow of its own, not an extra trigger of `cd.yml`.** `cd.yml` is a chain (build, staging, production). A run
+  that skips the build would have to skip or rewrite the condition of every job that needs it, and a job whose
+  `needs` was skipped is skipped itself unless its condition says otherwise. That is easy to get wrong and cannot be
+  tested short of running it.
+- **The rollback records the release it went back to.** Otherwise the parameter would still name the release that was
+  rolled back from, and a replacement instance, which deploys that parameter at boot, would bring the bad release
+  back.
+- **The environment is the input.** `environment: ${{ inputs.environment }}` makes the variables, the role and the
+  approval gate follow the choice with no extra logic, and production's rules cannot be skipped by choosing it.
+
+#### Checked (2026-11-11)
+
+Before this was merged, the rollback job was run once from a throwaway branch (the trigger and the inputs replaced
+by literals, nothing else changed) against staging, to the older release `70f912e-2` from step 1.14, which is a
+genuinely different image. It passed every step. The two containers on the instance then ran `...:70f912e-2`, the
+instance's `current-tag` and the SSM parameter said `70f912e-2`, the smoke test passed, and `/api/health` answered
+through the load balancer. `rollback-check.sh` was also run against staging's real ECR, for a tag that exists and
+for a typo, and its refusal listed the releases that are there.
+
+**Not checked:** a rollback of production (production has not been applied), and the `workflow_dispatch` trigger
+itself, which cannot run from a branch.
 
 ### Not done
 
