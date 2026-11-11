@@ -905,14 +905,14 @@ checks: nothing in it deploys.
 | Job | What it checks | Fails when |
 |-----|----------------|------------|
 | `changes` | Whether the Terraform, its tool settings or the workflow changed | it cannot decide |
-| `lint` | eslint and prettier (backend), eslint (frontend), hadolint on both Dockerfiles, shellcheck on the scripts, actionlint on the workflows, and that the local compose file is valid | any of them reports a problem |
+| `lint` | eslint and prettier (backend), eslint (frontend), hadolint on both Dockerfiles, shellcheck on the scripts, actionlint on the workflows, `scripts/check-workflows.sh` (the [hardening rules](#hardening-step-28)), and that the local compose file is valid | any of them reports a problem |
 | `unit-tests` | The backend Jest suite, with the coverage report kept as an artifact for 14 days | a test fails |
 | `integration-tests` | The migrations from scratch, then the integration test, against a `postgres:17` service container | a migration or a test fails |
 | `dependency-scan` | trivy on both lockfiles: production dependencies, HIGH and CRITICAL | any such finding |
 | `secret-scan` | gitleaks on the full history, against `.gitleaks-baseline.json` | a new secret |
 | `image-build-scan` | Builds both images (nothing is pushed) and scans them with trivy, HIGH and CRITICAL that have a fix | any such finding |
 | `iac-checks` | `terraform fmt`, `validate` in `bootstrap`, `staging` and `prod`, tflint and checkov | any of them reports a problem. Runs only when `infra/`, `.tflint.hcl`, `.checkov.yaml` or `ci.yml` changed |
-| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh`, `notify.sh` and `rollback-check.sh` | a check fails |
+| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh`, `notify.sh`, `rollback-check.sh` and `check-workflows.sh` | a check fails |
 
 **How it is built.**
 
@@ -1355,8 +1355,19 @@ instance's `current-tag` and the SSM parameter said `70f912e-2`, the smoke test 
 through the load balancer. `rollback-check.sh` was also run against staging's real ECR, for a tag that exists and
 for a typo, and its refusal listed the releases that are there.
 
-**Not checked:** a rollback of production (production has not been applied), and the `workflow_dispatch` trigger
-itself, which cannot run from a branch.
+After the merge, `workflow_dispatch` was run for real from `main`:
+
+- **A rollback of staging** to `70f912e-2` (the run is titled `Rollback staging to 70f912e-2`) passed, and staging
+  ran that release and the parameter named it.
+- **A mistyped tag**, `70f912f`, was refused at the step `The release is in ECR`, with both repositories' lists of
+  releases in the log. None of the deploy steps ran, staging still ran `70f912e-2`, and the failure e-mail
+  (`Rollback failed: rollback (main)`) was sent.
+- **A roll forward** to the newest release with the same workflow passed. The SSM parameter's history now shows the
+  sequence of what was deployed, rollbacks included.
+- The refactored deploy steps of `cd.yml` also ran for real, on the merge itself: `deploy-staging` passed through
+  the shared action.
+
+**Not checked:** a rollback of production (production has not been applied), and the concurrency caveat above.
 
 ### Not done
 
@@ -1476,6 +1487,135 @@ of those would exercise.
 - **Rate limiting or a digest.** Every failed run sends one e-mail.
 - **E-mail for a failed run of a fork's or Dependabot's pull request**, for the reason above.
 - **A second subscriber.** Add another `aws_sns_topic_subscription`, or subscribe by hand in the console.
+
+## Hardening (step 2.8)
+
+The plan asks for four things: actions pinned to full commit SHAs, least-privilege permissions per job, no
+long-lived cloud keys with secrets and variables scoped to environments, and a concurrency group per environment.
+Most of this was built in as the pipeline grew. This step audited it from the files, **turned the rules into an
+automated check** so that they stay true, and **enforced two of them in GitHub's own settings**.
+
+### Actions are pinned to full commit SHAs
+
+Every third-party action in `.github/workflows/` and `.github/actions/` is pinned to a 40-character commit SHA, with
+the version in a comment (`uses: actions/checkout@3d3c42e5... # v7.0.1`), and the scanner images are pinned by
+digest. Local actions (`./.github/actions/...`) are in the repository itself.
+
+**Why.** In March 2025 attackers modified the popular action `tj-actions/changed-files` and **retroactively repointed
+existing version tags to a malicious commit**, so every workflow that referred to the action by a tag ran it. Between
+14 and 15 March 2025 its script read secrets out of the runner's memory and printed them into the workflow logs, which
+are public in a public repository. GitHub's advisory says the action was used by over 23,000 repositories (the potential
+reach, not the number of victims) and that the fix is version 46.0.1. CISA wrote that it was potentially enabled by a
+compromise of another action, `reviewdog/action-setup@v1` (CVE-2025-30154), and added both CVEs to its Known Exploited
+Vulnerabilities catalog on 26 March 2025. Sources: GitHub's advisory
+[GHSA-mrrh-fwg8-r2c3](https://github.com/advisories/GHSA-mrrh-fwg8-r2c3) (CVE-2025-30066) and
+[CISA's alert](https://www.cisa.gov/news-events/alerts/2025/03/18/supply-chain-compromise-third-party-tj-actionschanged-files-cve-2025-30066-and-reviewdogaction).
+A tag can be moved after you have reviewed it. A commit SHA cannot.
+
+**What pinning does not do.** It protects you from a tag that is moved later. It does not help if the commit you
+pinned was already bad, and it does not cover what a pinned action downloads while it runs (the attack fetched its
+script from a gist). Dependabot bumps the pins weekly, in one pull request, so read that diff and be wary of an
+action whose maintainer you do not know. The other layers below, no stored keys and read-only tokens, limit what a bad
+action could take.
+
+**Three layers keep it true:**
+
+1. **A check on every pull request.** `scripts/check-workflows.sh` runs in the `lint` job (see below), so an unpinned
+   action is caught in the pull request, with the file and line, before anything runs. It also covers the composite
+   action files.
+2. **GitHub's own setting, "Require actions to be pinned to a full-length commit SHA"**, turned on for the
+   repository in this step (`sha_pinning_required`; [GitHub's announcement](https://github.blog/changelog/2025-08-15-github-actions-policy-now-supports-blocking-and-sha-pinning-actions/)).
+   It is enforced when the workflow runs, so it also covers a workflow that nobody reviewed. Checked for real: a
+   throwaway branch with a workflow that uses `actions/checkout@v4` failed at `Set up job` with
+   *"The action actions/checkout@v4 is not allowed in MihirBhavsar3102/digital-wallet-devops because all actions must
+   be pinned to a full-length commit SHA."*, and its steps never ran. The branch was deleted.
+3. **Dependabot** keeps the pins current, so that pinning does not mean never updating.
+
+### `scripts/check-workflows.sh`: the rules, as a check
+
+It reads every workflow and composite action and reports each problem as `file:line: what is wrong` (39 tests,
+mutation-checked, and run on this repository's own workflows too):
+
+| # | Rule | Why |
+|---|------|-----|
+| 1 | Every `uses:` is a local action, a Docker image by digest, or an action pinned to a full 40-character SHA | a tag or branch can be moved |
+| 2 | Every workflow declares top-level `permissions` | the token is never given the repository's default silently |
+| 3 | Those grant no write access, and there is no `write-all` anywhere | a job that needs more asks for exactly that on the job |
+| 4 | No `pull_request_target` | it runs with secrets and a write token on code from a fork |
+| 5 | No long-lived AWS keys (`aws-access-key-id`, `secrets.AWS_*`, ...) | the pipeline uses OIDC and a role |
+| 6 | Every `actions/checkout` sets `persist-credentials: false` | otherwise the token stays in the git config for later steps to read |
+
+It reads lines, not YAML, which is enough because the files are regular and means it needs only bash and awk.
+
+### Least privilege, per job
+
+The repository's default token is read-only (`default_workflow_permissions: read`, and Actions cannot approve pull
+requests), checked in the settings. Every workflow declares `contents: read` at the top (rules 2 and 3), and a job
+that needs more asks for it itself. The only extra permission anywhere is `id-token: write`, which a job needs to
+trade GitHub's token for AWS credentials:
+
+| Workflow | Jobs | Permissions |
+|----------|------|-------------|
+| `ci.yml` | `changes`, `lint`, `unit-tests`, `integration-tests`, `dependency-scan`, `secret-scan`, `image-build-scan`, `iac-checks`, `script-tests` | `contents: read` only: nothing in CI can reach AWS |
+| `ci.yml` | `notify` | `id-token: write`, only when a job failed |
+| `cd.yml` | `build-and-push`, `deploy-staging`, `deploy-production` | `id-token: write`, each in its own GitHub Environment |
+| `cd.yml` | `notify`, `announce-production` | `id-token: write` |
+| `rollback.yml` | `rollback`, `notify`, `announce-production` | `id-token: write`; `rollback` in the environment that was chosen |
+
+No job has `contents: write`, `pull-requests: write`, `packages: write` or any other write permission, because nothing in
+the pipeline pushes to the repository, comments on pull requests or publishes a package.
+
+### No long-lived cloud keys, and nothing secret to scope
+
+- **No AWS key exists anywhere.** Every job that reaches AWS assumes a role through OIDC and gets credentials that
+  last about an hour. The deploy roles trust one GitHub Environment each, and the notify role trusts a run on `main`
+  and a pull request, all in the immutable subject form (see
+  [GitHub Actions deploy roles](#github-actions-deploy-roles-oidc)). Rule 5 stops a key from being added.
+- **The repository has no secrets at all**, at the repository level or in either environment (`gh secret list` is
+  empty for all three), and no workflow refers to `secrets.`. There is no Slack webhook because e-mail was chosen,
+  and the AWS access is OIDC. If one is ever added, it belongs in the environment that uses it.
+- **Variables are scoped to the environment that owns them.** None is a secret.
+
+| Scope | Variables |
+|-------|-----------|
+| Environment `staging` | `AWS_ROLE_ARN`, `AWS_REGION`, `NAME_PREFIX`, `ALB_URL` |
+| Environment `production` | `AWS_ROLE_ARN`, `AWS_REGION`, `NAME_PREFIX`, `SOURCE_NAME_PREFIX` (`ALB_URL` is set when production is applied) |
+| Repository | `NOTIFY_ROLE_ARN`, `NOTIFY_TOPIC_ARN`: the notify jobs have no GitHub Environment, so they cannot read an environment's variables |
+
+### One deploy at a time per environment
+
+Two deploys to one environment can never overlap, at three levels:
+
+1. **GitHub:** the groups `deploy-staging` and `deploy-production` (`cancel-in-progress: false`), used by the deploy jobs
+   of `cd.yml` **and** by `rollback.yml` (`group: deploy-${{ inputs.environment }}`). A deploy that has started is never
+   cancelled, and of the runs queued for one environment only the newest waits. `build-and-push` has no group on purpose:
+   every commit pushes its own tag.
+2. **SSM:** `ssm-deploy.sh` sends the command with `--max-concurrency 1`, so the instances of one environment are updated
+   one at a time.
+3. **The instance:** `deploy.sh` holds a lock (`flock`), so a second deploy on the same instance fails instead of
+   overlapping.
+
+### GitHub settings changed in this step
+
+| Setting | Before | After | Why |
+|---------|--------|-------|-----|
+| Require actions to be pinned to a full-length commit SHA | off | **on** | enforced when the workflow runs, see above |
+| Approval for workflow runs from forks | first-time contributors | **all external contributors** | the repository is public: nobody outside runs a workflow on its runners without a person approving it |
+| Environment `staging`: deployment branches | any branch | **`main` only** | the staging role trusts any job in the environment, so a workflow on another branch that named `staging` could use it. `production` was already limited to `main` |
+
+Already right and left as they were: the read-only default token, Actions not being allowed to approve pull requests,
+and production's required reviewer.
+
+### Not done
+
+- **Pinning the OIDC trust to the workflow file.** The roles trust a repository and an environment, and GitHub's
+  token also carries a `job_workflow_ref` claim (which workflow file, at which ref). Requiring it, for example
+  `cd.yml` and `rollback.yml` at `refs/heads/main` for the deploy roles, would stop any other workflow that reaches
+  the environment from using the role. It is a change to the IAM trust policies, so it needs an apply.
+- **Watching the runner's network.** The tj-actions attack was detected by a tool that flags unexpected outbound calls
+  from the runner (the payload fetched a script from `gist.githubusercontent.com`). The runners here are GitHub's, with no
+  egress filtering.
+- **A second reviewer** for production (above).
 
 ## Credits
 

@@ -105,6 +105,11 @@ jobs:
       - name: actionlint on the workflows
         run: docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color
 
+      # The hardening rules of step 2.8 (README, Hardening): every action pinned to a full commit SHA, read-only
+      # top-level permissions, no pull_request_target, no long-lived AWS keys, persist-credentials: false.
+      - name: The workflows follow the hardening rules
+        run: scripts/check-workflows.sh
+
       - name: The local compose file is valid
         env:
           POSTGRES_PASSWORD: lint-only
@@ -307,8 +312,8 @@ jobs:
           pip install --quiet "checkov==3.4.3"
           checkov
 
-  # The tests for deploy.sh, smoke-test.sh, ecr-tag-status.sh, ssm-deploy.sh, promote-image.sh, notify.sh and
-  # rollback-check.sh. They need Linux tools, so they run in a container.
+  # The tests for deploy.sh, smoke-test.sh, ecr-tag-status.sh, ssm-deploy.sh, promote-image.sh, notify.sh,
+  # rollback-check.sh and check-workflows.sh. They need Linux tools, so they run in a container.
   script-tests:
     name: script-tests
     runs-on: ubuntu-latest
@@ -331,6 +336,8 @@ jobs:
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/notify.test.sh
       - name: rollback-check.sh
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/rollback-check.test.sh
+      - name: check-workflows.sh
+        run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/check-workflows.test.sh
 
   # E-mails a failed run (SNS, see "Pipeline notifications" in the README). It lists every other job, so it
   # only starts when they have all finished, and failure() is true when any of them failed. It is false for a
