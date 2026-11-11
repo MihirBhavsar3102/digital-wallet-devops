@@ -307,7 +307,7 @@ jobs:
           pip install --quiet "checkov==3.4.3"
           checkov
 
-  # The tests for deploy.sh, smoke-test.sh and ecr-tag-status.sh. They need Linux tools, so they run in a container.
+  # The tests for deploy.sh, smoke-test.sh, ecr-tag-status.sh and ssm-deploy.sh. They need Linux tools, so they run in a container.
   script-tests:
     name: script-tests
     runs-on: ubuntu-latest
@@ -322,3 +322,5 @@ jobs:
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/smoke-test.test.sh
       - name: ecr-tag-status.sh
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/ecr-tag-status.test.sh
+      - name: ssm-deploy.sh
+        run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/ssm-deploy.test.sh
