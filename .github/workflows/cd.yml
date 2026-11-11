@@ -252,23 +252,15 @@ jobs:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Runs /opt/app/deploy.sh <tag> on the instances tagged environment=staging and Role=app, one at a
-      # time, and stops at the first failure. It fails when no instance takes the command. See the script.
-      - name: Deploy to the staging instances
-        run: scripts/ssm-deploy.sh staging "$IMAGE_TAG"
-
-      # From the runner, through the public load balancer: what a user would reach, not what the
-      # instance says about itself. It checks that the page is the app and not the placeholder.
-      - name: Smoke test through the load balancer
-        run: scripts/smoke-test.sh "$ALB_URL"
-
-      # Only a release that passed the smoke test is recorded. A replacement instance reads this at boot
-      # and deploys the tag, so it converges to the last good version and not to the placeholder.
-      - name: Record the tag as the last good release
-        run: |
-          aws ssm put-parameter --name "/${NAME_PREFIX}/deployed-tag" --value "$IMAGE_TAG" \
-            --type String --overwrite > /dev/null
-          echo "/${NAME_PREFIX}/deployed-tag is now ${IMAGE_TAG}"
+      # Deploy to the instances tagged environment=staging and Role=app, smoke-test through the load
+      # balancer, and record the tag as the last good release. These three steps are one action, shared with
+      # production and with rollback.yml, so that a rollback runs exactly the deploy step a release does.
+      - uses: ./.github/actions/deploy
+        with:
+          instance-environment: staging
+          image-tag: ${{ env.IMAGE_TAG }}
+          alb-url: ${{ env.ALB_URL }}
+          name-prefix: ${{ env.NAME_PREFIX }}
 
       - name: Summary
         run: |
@@ -358,18 +350,15 @@ jobs:
           echo "The snapshot ${snapshot} is available"
           echo "snapshot=${snapshot}" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy to the production instances
-        run: scripts/ssm-deploy.sh prod "$IMAGE_TAG"
-
-      - name: Smoke test through the load balancer
-        run: scripts/smoke-test.sh "$ALB_URL"
-
-      # The deployed tag, recorded where the next deploy, a rollback and a replacement instance find it.
-      - name: Record the tag as the last good release
-        run: |
-          aws ssm put-parameter --name "/${NAME_PREFIX}/deployed-tag" --value "$IMAGE_TAG" \
-            --type String --overwrite > /dev/null
-          echo "/${NAME_PREFIX}/deployed-tag is now ${IMAGE_TAG}"
+      # The same action as staging and rollback.yml: deploy to the instances tagged environment=prod, smoke-test
+      # through the load balancer, and record the tag where the next deploy, a rollback and a replacement
+      # instance find it.
+      - uses: ./.github/actions/deploy
+        with:
+          instance-environment: prod
+          image-tag: ${{ env.IMAGE_TAG }}
+          alb-url: ${{ env.ALB_URL }}
+          name-prefix: ${{ env.NAME_PREFIX }}
 
       - name: Summary
         env:

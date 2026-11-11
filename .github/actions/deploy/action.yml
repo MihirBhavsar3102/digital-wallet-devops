@@ -1,0 +1,55 @@
+name: Deploy
+description: >-
+  Deploys an image tag that is already in ECR to the instances of one environment, smoke-tests it through the
+  load balancer, and only then records it as the last good release. It is shared by cd.yml (staging and
+  production) and rollback.yml, so that a rollback runs exactly the deploy step that a release does. The caller
+  has to check the repository out and to have the AWS credentials of the environment's deploy role in place
+  (aws-actions/configure-aws-credentials).
+
+inputs:
+  instance-environment:
+    description: "The value of the instances' environment tag: staging or prod."
+    required: true
+  image-tag:
+    description: "The release to deploy: the short commit SHA of two images that are in the environment's ECR."
+    required: true
+  alb-url:
+    description: "http://<the environment's load balancer>, for the smoke test."
+    required: true
+  name-prefix:
+    description: "The environment's name prefix, which names the deployed-tag parameter."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Runs /opt/app/deploy.sh <tag> on the instances tagged environment=<...> and Role=app, one at a time,
+    # and stops at the first failure. It fails when no instance takes the command. See the script.
+    - name: Deploy to the instances
+      shell: bash
+      env:
+        INSTANCE_ENVIRONMENT: ${{ inputs.instance-environment }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+      run: '"$GITHUB_WORKSPACE/scripts/ssm-deploy.sh" "$INSTANCE_ENVIRONMENT" "$IMAGE_TAG"'
+
+    # From the runner, through the public load balancer: what a user would reach, not what the instance
+    # says about itself. It checks that the page is the app and not the placeholder.
+    - name: Smoke test through the load balancer
+      shell: bash
+      env:
+        ALB_URL: ${{ inputs.alb-url }}
+      run: '"$GITHUB_WORKSPACE/scripts/smoke-test.sh" "$ALB_URL"'
+
+    # Only a release that passed the smoke test is recorded. A replacement instance reads this at boot and
+    # deploys the tag, so it converges to the last good version and not to the placeholder. A rollback
+    # records the release it went back to, too: otherwise a replacement instance would deploy the release
+    # that was rolled back from.
+    - name: Record the tag as the last good release
+      shell: bash
+      env:
+        NAME_PREFIX: ${{ inputs.name-prefix }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+      run: |
+        aws ssm put-parameter --name "/${NAME_PREFIX}/deployed-tag" --value "$IMAGE_TAG" \
+          --type String --overwrite > /dev/null
+        echo "/${NAME_PREFIX}/deployed-tag is now ${IMAGE_TAG}"
