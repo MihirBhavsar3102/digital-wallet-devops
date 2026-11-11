@@ -660,8 +660,8 @@ because the first-boot placeholder also answers 200 on `/` and `/api`. Locally:
 `docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:stable /mnt/scripts/*.sh /mnt/scripts/tests/*.sh`.
 
 **npm 12.** On a machine with npm 12 (npm blocks dependency install scripts by default), run
-`npm run prisma:generate` after `npm ci`, and bcrypt's `node-pre-gyp install` inside `node_modules/bcrypt`.
-The images and CI use Node 22 with npm 10, where those scripts run.
+`npm run prisma:generate` after `npm ci`. (bcrypt 6 ships its prebuilt binaries inside the package, so it no
+longer needs an install script.) The images and CI use Node 22 with npm 10, where Prisma's script runs.
 
 ## Application images and deploy
 
@@ -754,7 +754,8 @@ known limit. This is not decided yet.
 | `infra/bootstrap/` | One-off Terraform that creates the remote-state bucket and the account-wide GitHub OIDC provider |
 | `infra/modules/` | Reusable Terraform modules |
 | `infra/envs/staging/`, `infra/envs/prod/` | One folder per environment, both calling the same modules |
-| `.github/workflows/` | GitHub Actions pipelines |
+| `.github/workflows/` | GitHub Actions pipelines (`ci.yml` for pull requests) |
+| `.github/dependabot.yml` | Weekly dependency update pull requests for npm, Docker, GitHub Actions and Terraform |
 | `scripts/` | The deploy script, the smoke test, and the tests for both (`scripts/tests/`) |
 | `monitoring/` | CloudWatch agent configuration |
 | `docs/` | Challenges log and approach documentation |
@@ -763,7 +764,8 @@ known limit. This is not decided yet.
 ## Quality gates
 
 Four tools check the Terraform and the repository. The pre-commit hooks run `terraform fmt`, tflint and
-gitleaks on every commit, and CI runs all of them, with checkov and `terraform validate`, in step 2.2.
+gitleaks on every commit, and CI runs all of them, with checkov and `terraform validate`, on every pull
+request (see [Continuous integration](#continuous-integration-pull-requests)).
 
 | Tool | What it checks | How to run it |
 |------|----------------|---------------|
@@ -837,6 +839,79 @@ findings, with the values redacted, and a scan against it reports only new leaks
 and the database password `1234` as public: they must never be used in AWS, and step 2.1 removes them from
 the compose file. A scan of the working tree also flags the local `app/.env`. That file is git-ignored, was
 never committed, and the hooks and CI do not scan it.
+
+## Continuous integration (pull requests)
+
+`.github/workflows/ci.yml` runs on every pull request to `main`, and by hand (`workflow_dispatch`). It only
+checks: nothing in it deploys.
+
+| Job | What it checks | Fails when |
+|-----|----------------|------------|
+| `changes` | Whether the Terraform, its tool settings or the workflow changed | it cannot decide |
+| `lint` | eslint and prettier (backend), eslint (frontend), hadolint on both Dockerfiles, shellcheck on the scripts, actionlint on the workflows, and that the local compose file is valid | any of them reports a problem |
+| `unit-tests` | The backend Jest suite, with the coverage report kept as an artifact for 14 days | a test fails |
+| `integration-tests` | The migrations from scratch, then the integration test, against a `postgres:17` service container | a migration or a test fails |
+| `dependency-scan` | trivy on both lockfiles: production dependencies, HIGH and CRITICAL | any such finding |
+| `secret-scan` | gitleaks on the full history, against `.gitleaks-baseline.json` | a new secret |
+| `image-build-scan` | Builds both images (nothing is pushed) and scans them with trivy, HIGH and CRITICAL that have a fix | any such finding |
+| `iac-checks` | `terraform fmt`, `validate` in `bootstrap`, `staging` and `prod`, tflint and checkov | any of them reports a problem. Runs only when `infra/`, `.tflint.hcl`, `.checkov.yaml` or `ci.yml` changed |
+| `script-tests` | The tests for `deploy.sh` and `smoke-test.sh` | a check fails |
+
+**How it is built.**
+
+- **Pinned.** Every third-party action is pinned to a full commit SHA (the version is in a comment), chosen from
+  releases at least two weeks old. The scanners (hadolint, shellcheck, actionlint, trivy, gitleaks) run as
+  images pinned by digest, so a moved tag cannot change what runs. The digests are listed once, at the top of
+  the workflow, and are updated by hand: Dependabot does not read `docker run` commands.
+- **Least privilege.** The token is read-only (`permissions: contents: read`), every job has a timeout, and a
+  new push to the same pull request cancels the run it supersedes. There is no `pull_request_target`.
+- **A job, not a path filter.** `iac-checks` is skipped by a `changes` job and not by a `paths` filter on the
+  workflow. A workflow that a filter skips never reports its required checks, so the pull request would wait
+  forever, while a skipped job counts as passed. Because a skipped job counts as passed, `changes` is a
+  required check as well: otherwise a failure there would silently skip the Terraform checks.
+- **Throwaway credentials.** The integration job's database password (`ci-only`) protects a container that
+  exists for the length of the job and is not reachable from outside.
+
+**Branch protection on `main`.** A pull request is required (with no required approvals, because this is a
+single-person repository and GitHub does not let you approve your own pull request). All nine jobs above must
+pass, the branch must be up to date with `main`, the rules apply to administrators too, and force-pushes and
+deletion of `main` are blocked. To relax a rule temporarily, change it under Settings, Branches and put it back.
+
+**Dependency findings fixed in this step.** The step 0.5 baseline output is not in the repository (`evidence/`
+is git-ignored), so the "before" figures are from scanning the lockfiles on `main` at the start of the step:
+38 HIGH and CRITICAL findings in 12 production packages (36 in the backend, 2 in the frontend), all with a
+fixed version available. The backend image reported 46: the same application packages plus 10 more from the
+npm bundled in the Node base image. The frontend image had 2, in an Alpine package. After this step both
+lockfiles and both images report zero.
+
+- `npm audit fix` took the changes that stay inside the declared version ranges.
+- `bcrypt` 5 to 6 removes `tar` (9 findings, one of them critical), which it needed only to unpack its
+  prebuilt binary at install time. bcrypt 6 ships the binary in the package.
+- Four packages are pinned to vulnerable versions by NestJS itself, so `package.json` has scoped `overrides`:
+  `multer` and `body-parser` under `@nestjs/platform-express`, `js-yaml` and `lodash` under `@nestjs/swagger`,
+  and `lodash` under `@nestjs/config`. `npm audit fix` cannot move an exact pin, which is why these needed
+  overrides. Dependabot does not update overrides, so revisit them when NestJS is updated.
+- The backend runtime image deletes npm, npx and corepack. It starts with `node dist/main.js` and runs
+  migrations with `node_modules/.bin/prisma`, so it never uses them, and they carried their own vulnerable
+  dependencies.
+- The frontend image runs `apk upgrade libxslt`, because the pinned `nginx:1.30.6-alpine` still ships a version
+  with two fixable HIGH findings. Remove that line when the next nginx tag carries the fix.
+
+**Not covered.** Three HIGH findings remain in development-only tooling (`glob`, `picomatch` and `tmp`, through
+the Nest CLI). They are not in the runtime image and the gate does not scan development dependencies, so they
+are noted here and not suppressed. Findings in the base image with no fix yet are left out of the image scan
+(`--ignore-unfixed`) because nothing can be done about them. There is no `.trivyignore`: a finding is fixed,
+and if one ever cannot be, the ignore file must carry a comment for each entry. Uploading the results to
+GitHub's Security tab (SARIF) is not done.
+
+**Dependabot** (`.github/dependabot.yml`) opens weekly pull requests, grouped by minor and patch, for npm
+(backend and frontend), the two Dockerfiles, GitHub Actions and Terraform. Moving to another Node release line
+is excluded: it is a decision, not an update. Its pull requests pass through the same checks.
+
+**Running the same checks locally.** Everything above uses tools you can run yourself; the exact commands are in
+the workflow. For example `docker run --rm -i hadolint/hadolint < app/backend/Dockerfile`,
+`trivy fs app --scanners vuln --severity HIGH,CRITICAL`, and `gitleaks git --baseline-path
+.gitleaks-baseline.json`. The Terraform checks are listed under [Quality gates](#quality-gates).
 
 ## Credits
 
