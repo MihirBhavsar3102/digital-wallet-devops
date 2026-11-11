@@ -119,6 +119,13 @@ data "aws_iam_policy_document" "github_deploy" {
     ]
     resources = var.ecr_repository_arns
   }
+  # Lets the pipeline ask whether a commit's tag is already in a repository, so that a re-run of that
+  # commit skips the push (tags are immutable, a second push is rejected). Read-only image metadata.
+  statement {
+    sid       = "EcrTagExists"
+    actions   = ["ecr:DescribeImages"]
+    resources = var.ecr_repository_arns
+  }
   statement {
     sid       = "RunCommandDocument"
     actions   = ["ssm:SendCommand"]

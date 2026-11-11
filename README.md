@@ -162,6 +162,7 @@ Each environment has its own role, `<name_prefix>-github-deploy`:
 | Permission | Scope |
 |------------|-------|
 | ECR push: `BatchCheckLayerAvailability`, `InitiateLayerUpload`, `UploadLayerPart`, `CompleteLayerUpload`, `PutImage` | This environment's two repositories only |
+| `ecr:DescribeImages` (added in step 2.3) | This environment's two repositories only. Read-only: lets the pipeline ask whether a commit's tag is already pushed, so that a re-run skips the push |
 | `ssm:SendCommand` | The `AWS-RunShellScript` document, and only instances tagged `environment=<env>` |
 | `ssm:GetCommandInvocation` | `*`, to read command results |
 | `rds:CreateDBSnapshot` (**prod only**) | The production database and snapshots named `digital-wallet-prod-*` |
