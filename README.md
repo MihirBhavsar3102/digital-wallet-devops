@@ -149,6 +149,7 @@ privilege, with no wildcard on anything that supports resource-level permissions
 | ECR pull: `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability` | This environment's two repositories only |
 | `ecr:GetAuthorizationToken` | `*`, because AWS does not support scoping this action to a resource |
 | `secretsmanager:GetSecretValue` | The RDS-managed database secret and the [JWT secret](#jwt-secret) only, by exact ARN |
+| `ssm:GetParameter` (added in step 2.4) | The one parameter `/<name_prefix>/deployed-tag` only: the tag of the last release that passed its smoke test, read at boot (see [First boot](#first-boot)) |
 
 ### GitHub Actions deploy roles (OIDC)
 
@@ -164,7 +165,8 @@ Each environment has its own role, `<name_prefix>-github-deploy`:
 | ECR push: `BatchCheckLayerAvailability`, `InitiateLayerUpload`, `UploadLayerPart`, `CompleteLayerUpload`, `PutImage` | This environment's two repositories only |
 | `ecr:DescribeImages` (added in step 2.3) | This environment's two repositories only. Read-only: lets the pipeline ask whether a commit's tag is already pushed, so that a re-run skips the push |
 | `ssm:SendCommand` | The `AWS-RunShellScript` document, and only instances tagged `environment=<env>` |
-| `ssm:GetCommandInvocation` | `*`, to read command results |
+| `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations`, `ssm:ListCommands` (the last two added in step 2.4) | `*`, to read command results, find the instances a command reached and ask whether the command as a whole succeeded. None of the three supports resource-level permissions |
+| `ssm:PutParameter` (added in step 2.4) | The one parameter `/<name_prefix>/deployed-tag`, which the pipeline writes after a deploy has passed its smoke test |
 | `rds:CreateDBSnapshot` (**prod only**) | The production database and snapshots named `digital-wallet-prod-*` |
 
 Each trust policy checks two claims in the GitHub token: the audience must be `sts.amazonaws.com`, and
@@ -210,6 +212,8 @@ useless to anyone but a job from this repository and environment.
   Provider `default_tags` are not applied to instances launched by an Auto Scaling group, so the
   [compute module](#compute) sets the tag on the group with propagation. Checked on staging: both
   instances carry `environment=staging` and `Role=app`.
+- The parameter `/<name_prefix>/deployed-tag` is created by the compute module and its permissions are built
+  from the same name in the IAM module: change one and the other has to follow.
 - **Not exercised yet:** the `ssm:resourceTag/environment` condition. The tag it needs is in place,
   but the condition is only tested once the pipeline runs `ssm:SendCommand` as the deploy role.
 
@@ -247,7 +251,15 @@ A short `user_data` script runs once per instance and:
    of `scripts/deploy.sh`, which is still a skeleton until the pipeline step;
 5. starts a **placeholder** nginx container on the frontend and backend ports (80 and 8081), so load balancer health checks pass
    before the first real deploy. Its page shows which instance answered, and `/api` returns 200. The
-   image comes from the public ECR mirror of nginx, which avoids Docker Hub's pull rate limits.
+   image comes from the public ECR mirror of nginx, which avoids Docker Hub's pull rate limits;
+6. **converges to the last good release** (step 2.4): reads the SSM parameter `/<name_prefix>/deployed-tag`
+   and, unless it says `none`, runs `deploy.sh` with that tag. The pipeline writes the tag after every deploy
+   that passed its smoke test. Without this step a replacement instance (a failed health check, an instance
+   refresh, a scale-out) would serve the placeholder until the next deploy. If the deploy fails here the
+   placeholder stays up and the boot still finishes. Terraform creates the parameter with the value `none`
+   and ignores later changes to the value, which belongs to the pipeline. It is destroyed with the
+   environment on purpose: a rebuilt environment has empty ECR repositories, so a surviving tag would point
+   at an image that no longer exists.
 
 `deploy.sh` has to remove the placeholder (`docker rm -f placeholder`) before it starts the real
 containers, because both use ports 80 and 8081.

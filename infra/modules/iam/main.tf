@@ -11,6 +11,11 @@ locals {
   # policy written for the name-only form, repo:OWNER/REPO:environment:NAME, never matches such a
   # token, and AWS answers "Not authorized to perform sts:AssumeRoleWithWebIdentity". The ids also
   # mean that a repository deleted and recreated under the same name cannot assume this role.
+  # The SSM parameter that holds the tag of the last release that passed its smoke test. The compute module
+  # creates it under this name and reads it at boot, the pipeline writes it. The name is a convention
+  # between those places, as the RDS identifier is for the snapshot permission below.
+  deployed_tag_parameter_arn = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${var.name_prefix}/deployed-tag"
+
   github_owner   = split("/", var.github_repository)[0]
   github_repo    = split("/", var.github_repository)[1]
   github_subject = "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}:environment:${var.github_environment}"
@@ -78,6 +83,22 @@ resource "aws_iam_role_policy" "app_secrets" {
   name   = "read-app-secrets"
   role   = aws_iam_role.ec2.id
   policy = data.aws_iam_policy_document.app_secrets.json
+}
+
+# A new instance reads the tag of the last good release at boot (user_data), so that a replacement
+# instance converges to it instead of staying on the placeholder.
+data "aws_iam_policy_document" "deployed_tag_read" {
+  statement {
+    sid       = "ReadDeployedTag"
+    actions   = ["ssm:GetParameter"]
+    resources = [local.deployed_tag_parameter_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "deployed_tag_read" {
+  name   = "read-deployed-tag"
+  role   = aws_iam_role.ec2.id
+  policy = data.aws_iam_policy_document.deployed_tag_read.json
 }
 
 resource "aws_iam_instance_profile" "ec2" {
@@ -151,10 +172,17 @@ data "aws_iam_policy_document" "github_deploy" {
       values   = [var.environment]
     }
   }
+  # ssm-deploy.sh lists the command's invocations to find the instances it reached, and asks for the
+  # command's overall status. These actions do not support resource-level permissions.
   statement {
     sid       = "ReadCommandResult"
-    actions   = ["ssm:GetCommandInvocation"]
+    actions   = ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations", "ssm:ListCommands"]
     resources = ["*"]
+  }
+  statement {
+    sid       = "RecordDeployedTag"
+    actions   = ["ssm:PutParameter"]
+    resources = [local.deployed_tag_parameter_arn]
   }
 }
 

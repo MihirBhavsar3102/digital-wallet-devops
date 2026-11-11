@@ -75,3 +75,14 @@ docker run -d --name placeholder --restart unless-stopped \
   -v /opt/app/placeholder/default.conf:/etc/nginx/conf.d/default.conf:ro \
   -v /opt/app/placeholder/index.html:/usr/share/nginx/html/index.html:ro \
   public.ecr.aws/nginx/nginx:stable-alpine
+
+# --- Converge to the last release that passed its smoke test.
+# The pipeline records the tag of every verified deploy in this parameter (cd.yml). Without this, a
+# replacement instance (a failed health check, an instance refresh, a scale-out) would serve the
+# placeholder until the next deploy. "none" means nothing has been deployed yet. A failure here is not
+# fatal: the placeholder keeps the instance healthy for the load balancer and the next deploy fixes it.
+export PATH="$PATH:/snap/bin"
+RELEASE_TAG=$(aws ssm get-parameter --region ${region} --name "/${name_prefix}/deployed-tag" --query Parameter.Value --output text) || RELEASE_TAG=none
+if [ "$RELEASE_TAG" != "none" ]; then
+  /opt/app/deploy.sh "$RELEASE_TAG" || echo "deploy of $RELEASE_TAG failed, the placeholder stays up"
+fi

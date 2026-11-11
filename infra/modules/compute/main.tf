@@ -25,6 +25,22 @@ locals {
   })
 }
 
+# The tag of the last release that passed its smoke test. The pipeline writes it (cd.yml, after the smoke
+# test) and a new instance reads it at boot (user_data), so a replacement instance converges to the last
+# good version instead of staying on the placeholder. Terraform creates it so that it exists before the
+# first deploy and is destroyed with the environment: a rebuilt environment has empty ECR repositories,
+# so a surviving tag would point at an image that no longer exists. The value belongs to the pipeline.
+# The name is also built in the iam module (the permissions on it): keep the two in step.
+resource "aws_ssm_parameter" "deployed_tag" {
+  #checkov:skip=CKV2_AWS_34:An image tag is not a secret, so SecureString would only add a key permission to every reader.
+  name  = "/${var.name_prefix}/deployed-tag"
+  type  = "String"
+  value = "none" # "none" means nothing has been deployed yet
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
 resource "aws_launch_template" "app" {
   name                   = "${var.name_prefix}-app-lt"
   image_id               = data.aws_ami.ubuntu.id
