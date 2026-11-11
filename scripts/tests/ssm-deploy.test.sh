@@ -26,6 +26,9 @@ check() { local name="$1"; shift; if "$@"; then ok "$name"; else bad "$name"; fi
 # A fresh fake aws. The scenario is set with environment variables, set after setup:
 #   INSTANCES        the instances the command reaches (default "i-aaa")
 #   FAIL_INSTANCE    that instance's deploy fails (exit 1 on the instance, with output on stderr)
+#   COLLATERAL       that instance was stopped by SSM ("Terminated", no output) because FAIL_INSTANCE failed
+#                    first: SSM runs the instances in an order of its own, and with --max-errors 0 the first
+#                    failure terminates the rest
 #   WAITER_TIMEOUTS  the first N waits on an instance end like the real waiter's "max attempts exceeded"
 #                    (exit 255) while the command is still InProgress
 #   NEVER_RUNS       always InProgress (never finishes)
@@ -41,7 +44,7 @@ setup() {
   BIN="$TMP/bin"
   mkdir -p "$BIN" "$STATE"
   : > "$CALLS"
-  unset INSTANCES FAIL_INSTANCE WAITER_TIMEOUTS NEVER_RUNS NO_TARGETS NO_TARGETS_SUCCESS OVERALL_FAILED LATE_LIST LAZY SEND_ERROR
+  unset INSTANCES FAIL_INSTANCE COLLATERAL WAITER_TIMEOUTS NEVER_RUNS NO_TARGETS NO_TARGETS_SUCCESS OVERALL_FAILED LATE_LIST LAZY SEND_ERROR
   export POLL_DELAY=0 DEPLOY_TIMEOUT=5 NO_TARGET_GRACE=2
 
   cat > "$BIN/aws" <<'STUB'
@@ -63,6 +66,16 @@ case "$1 $2" in
     n=$(count list)
     [ -n "${NO_TARGETS:-}" ] && exit 0
     [ "$n" -le "${LATE_LIST:-0}" ] && exit 0
+    case "$(arg --query "$@")" in
+      *StatusDetails*)
+        for i in $(instances); do
+          if [ "$i" = "${FAIL_INSTANCE:-}" ]; then printf '%s\tFailed\tFailed\n' "$i"
+          elif [ "$i" = "${COLLATERAL:-}" ]; then printf '%s\tFailed\tTerminated\n' "$i"
+          elif finished "$i"; then printf '%s\tSuccess\tSuccess\n' "$i"
+          else printf '%s\tInProgress\tInProgress\n' "$i"; fi
+        done
+        exit 0 ;;
+    esac
     if [ -n "${LAZY:-}" ]; then
       f=$(first)
       if finished "$f"; then instances | tr ' ' '\t'; echo; else echo "$f"; fi
@@ -82,6 +95,7 @@ case "$1 $2" in
     i=$(arg --instance-id "$@")
     n=$(count "wait-$i")
     if [ "$i" = "${FAIL_INSTANCE:-}" ]; then touch "$STATE/done-$i"; exit 255; fi
+    if [ "$i" = "${COLLATERAL:-}" ]; then exit 255; fi
     if [ -n "${NEVER_RUNS:-}" ] || [ "$n" -le "${WAITER_TIMEOUTS:-0}" ]; then
       echo "Waiter CommandExecuted failed: Max attempts exceeded" >&2; exit 255
     fi
@@ -91,14 +105,14 @@ case "$1 $2" in
     q=$(arg --query "$@")
     case "$q" in
       Status)
-        if [ "$i" = "${FAIL_INSTANCE:-}" ]; then echo "Failed"
+        if [ "$i" = "${FAIL_INSTANCE:-}" ] || [ "$i" = "${COLLATERAL:-}" ]; then echo "Failed"
         elif finished "$i"; then echo "Success"
         else echo "InProgress"; fi ;;
       StandardOutputContent)
         if [ "$i" = "${FAIL_INSTANCE:-}" ]; then echo "==> database migrations"; else echo "deployed ${TAG_UNDER_TEST:-abc1234} on $i"; fi ;;
       StandardErrorContent)
         if [ "$i" = "${FAIL_INSTANCE:-}" ]; then echo "migration failed: nothing was restarted"; fi ;;
-      *) echo "Failed	1" ;;
+      *) if [ "$i" = "${COLLATERAL:-}" ]; then printf 'Terminated\t-1\n'; else printf 'Failed\t1\n'; fi ;;
     esac ;;
   *) echo "fake aws: unexpected call: $*" >&2; exit 99 ;;
 esac
@@ -122,10 +136,42 @@ waited_on()  { grep -F -- "ssm wait command-executed" "$CALLS" | grep -qF -- "--
 not_waited() { ! waited_on "$1"; }
 no_waits()   { ! grep -qF -- "ssm wait" "$CALLS"; }
 
+# remote_command: the shell command that was sent to the instances, out of the recorded send-command call.
+remote_command() {
+  python -I -c '
+import json, re, sys
+line = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"--parameters (\{.*\}) --max-concurrency", line)
+print(json.loads(m.group(1))["commands"][0])
+' "$CALLS"
+}
+
+# run_remote <app dir> [cloud-init exit status]: runs that command here, with the app directory moved to a
+# temporary one, a fake cloud-init that logs its call and exits with the given status, and a stub deploy.sh
+# (when the directory has one). The result is in RRC, and the order of the calls is in $TMP/remote.log.
+run_remote() {
+  local appdir="$1" ci_status="${2:-0}" cmd
+  : > "$TMP/remote.log"
+  mkdir -p "$TMP/rbin"
+  printf '#!/usr/bin/env bash\necho "cloud-init $*" >> "%s/remote.log"\nexit %s\n' "$TMP" "$ci_status" > "$TMP/rbin/cloud-init"
+  chmod +x "$TMP/rbin/cloud-init"
+  cmd=$(remote_command | sed "s#/opt/app#${appdir}#g")
+  ROUT=$(PATH="$TMP/rbin:$PATH" bash -c "$cmd" 2>&1); RRC=$?
+}
+make_deploy_stub() {
+  mkdir -p "$1"
+  printf '#!/usr/bin/env bash\necho "deploy.sh $*" >> "%s/remote.log"\n' "$TMP" > "$1/deploy.sh"
+  chmod +x "$1/deploy.sh"
+}
+remote_rc_is()  { [ "$RRC" -eq "$1" ]; }
+remote_has()    { grep -qF -- "$1" <<< "$ROUT"; }
+remote_log_is() { [ "$(cat "$TMP/remote.log")" = "$1" ]; }
+
 echo "# one healthy instance"
 setup; run_script staging abc1234
 check "exits 0" rc_is 0
-check "runs deploy.sh with the tag on the instance" sent '"commands":["/opt/app/deploy.sh abc1234"]'
+check "ends with deploy.sh and the tag on the instance" sent '; /opt/app/deploy.sh abc1234"]'
+check "first waits for the instance to finish booting" sent 'cloud-init status --wait'
 check "targets the environment tag" sent "Key=tag:environment,Values=staging"
 check "targets the Role=app tag" sent "Key=tag:Role,Values=app"
 check "uses the AWS-RunShellScript document" sent "--document-name AWS-RunShellScript"
@@ -135,6 +181,23 @@ check "limits how long deploy.sh may run on an instance" sent '"executionTimeout
 check "waits with aws ssm wait command-executed" waited_on i-aaa
 check "shows what deploy.sh printed" all_has "deployed abc1234 on i-aaa"
 check "says it succeeded" all_has "deployed abc1234 to staging"
+
+echo "# the command that runs on the instance"
+# The first deploy to hit an instance that is still booting (its SSM agent is up and its tags are set, but
+# user_data has not written /opt/app/deploy.sh yet) failed with "deploy.sh: not found", status 127.
+setup; run_script staging abc1234
+make_deploy_stub "$TMP/app"; run_remote "$TMP/app"
+check "waits for cloud-init, then runs deploy.sh with the tag" remote_log_is $'cloud-init status --wait\ndeploy.sh abc1234'
+check "and succeeds when deploy.sh does" remote_rc_is 0
+setup; run_script staging abc1234
+mkdir -p "$TMP/empty"; run_remote "$TMP/empty"
+check "an instance that finished booting without deploy.sh fails" remote_rc_is 1
+check "and says the boot did not finish, not 'not found'" remote_has "has not finished booting"
+check "and points at the boot log" remote_has "cloud-init-output.log"
+check "and runs nothing" remote_log_is "cloud-init status --wait"
+setup; run_script staging abc1234
+make_deploy_stub "$TMP/app"; run_remote "$TMP/app" 1
+check "a cloud-init error elsewhere in the boot does not stop a deploy that can run" remote_log_is $'cloud-init status --wait\ndeploy.sh abc1234'
 
 echo "# two instances, one at a time"
 setup; export INSTANCES="i-aaa i-bbb"; run_script prod abc1234
@@ -158,6 +221,18 @@ check "does not say it succeeded" all_lacks "deployed abc1234 to staging"
 setup; export INSTANCES="i-aaa i-bbb" FAIL_INSTANCE=i-bbb; run_script staging abc1234
 check "a failure on the second instance fails the run too" rc_not 0
 check "after the first one succeeded" waited_on i-aaa
+
+echo "# SSM runs the instances in its own order, and stops the rest at the first failure"
+# Seen on staging: the instance that failed was not the one the script waited on first. The one it waited
+# on was reported "Terminated", which was SSM stopping it after the other failed, and the real error was
+# not shown.
+setup; export INSTANCES="i-aaa i-bbb" FAIL_INSTANCE=i-bbb COLLATERAL=i-aaa; run_script staging abc1234
+check "the run fails" rc_not 0
+check "shows the output of the instance that really failed, though it was not the one waited on" all_has "migration failed: nothing was restarted"
+check "names the instance that really failed" all_has "i-bbb: Failed (Failed)"
+check "says the other one was stopped, and not that it failed" all_has "i-aaa: Failed (Terminated)"
+check "does not print output for the instance SSM only stopped" all_lacks "stdout of i-aaa"
+check "does not say it succeeded" all_lacks "deployed abc1234 to staging"
 
 echo "# a deploy that reaches no instance fails"
 setup; export NO_TARGETS=1; run_script staging abc1234

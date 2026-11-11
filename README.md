@@ -250,8 +250,10 @@ A short `user_data` script runs once per instance and:
 
 1. switches Ubuntu's apt sources to HTTPS (see [Ubuntu package updates over HTTPS](#ubuntu-package-updates-over-https));
 2. installs Docker Engine and the Compose plugin from Docker's official apt repository;
-3. installs the AWS CLI (used by `deploy.sh` for the ECR login and Secrets Manager) and the CloudWatch
-   agent (its configuration is added in the monitoring step);
+3. installs the AWS CLI (used by `deploy.sh` for the ECR login and Secrets Manager) with AWS's own installer
+   from `awscli.amazonaws.com`, and the CloudWatch agent (its configuration is added in the monitoring step).
+   The CLI used to come from the Snap store, which was unreachable on 2026-11-11 and kept every new instance
+   from booting, see [Boot without the Snap store](#boot-without-the-snap-store);
 4. creates `/opt/app/` containing `instance.env` (region, account ID, name prefix) and `deploy.sh`, a copy
    of `scripts/deploy.sh`, which is still a skeleton until the pipeline step;
 5. starts a **placeholder** nginx container on the frontend and backend ports (80 and 8081), so load balancer health checks pass
@@ -278,6 +280,25 @@ containers, because both use ports 80 and 8081.
 - Rolling instance refresh, keeping at least 50% of capacity healthy. The group references
   `latest_version` of the launch template, so editing the template (including `user_data`) replaces the
   instances one at a time.
+
+### Boot without the Snap store
+
+The first `user_data` installed the AWS CLI with `snap install aws-cli --classic`. On 2026-11-11 at about 15:00
+UTC the Snap store stopped answering: `api.snapcraft.io` and `snapcraft.io` timed out over IPv4 from the
+staging instance, which is in `ap-south-1`, and from a laptop on another network, while Docker, AWS and
+Ubuntu's archive answered normally. (No incident was reported publicly that I could find, so the cause is
+unknown.) `snap install` failed with `error: unable to contact snap store`, and because the script stops at
+its first error, no new instance got as far as writing `/opt/app/deploy.sh` or starting the placeholder. Each
+one failed the load balancer's health check and was replaced after about six minutes by one that failed the
+same way: an instance refresh that never finished, while the one old instance kept serving. The first
+deploy to arrive in the middle of that failed with `/opt/app/deploy.sh: not found`.
+
+The CLI now comes from AWS's own installer (`curl` of `awscli.amazonaws.com`, `unzip`, `install`), which puts it
+in `/usr/local/bin`, on the default PATH of every shell including SSM's. Tried first on Ubuntu 26.04: it
+installs and runs. This removes the one dependency on a service that is not AWS, Docker or Canonical's package
+archive. Boot still depends on those three, and on the public ECR mirror of nginx. Baking an image with
+everything installed (for example with Packer) would remove them all, at the price of an image pipeline: it is
+listed under future improvements.
 
 ### Tags and SSM
 
@@ -1081,7 +1102,7 @@ the same role, and deploys the tag that job output:
    also answers 200, does not pass.
 3. **Records the tag** in the SSM parameter `/<name_prefix>/deployed-tag`, only after the smoke test passed.
 
-**How `ssm-deploy.sh` waits and fails** (49 tests in `scripts/tests/ssm-deploy.test.sh`):
+**How `ssm-deploy.sh` waits and fails** (63 tests in `scripts/tests/ssm-deploy.test.sh`):
 
 - **One instance at a time, and stop at the first error.** `--max-concurrency 1` and `--max-errors 0`. The
   parameter names come from `aws ssm send-command help`: `MaxErrors` is "the maximum number of errors allowed
@@ -1093,9 +1114,18 @@ the same role, and deploys the tag that job output:
   after 20 attempts, 100 seconds, which a deploy that pulls images and runs migrations can exceed. When it gives
   up while the command is still `InProgress` the script calls it again, until 15 minutes. Failed, TimedOut and
   Cancelled end the run.
-- **On failure it prints the instance's output.** `aws ssm get-command-invocation` supplies the stdout and
-  stderr of `deploy.sh` and the exit code, and the run fails. A successful run prints the same output, so the
-  log shows what each instance did.
+- **It waits for an instance that is still booting.** A new instance has its SSM agent running and its tags set
+  within a minute, but `user_data` takes about three before `/opt/app/deploy.sh` exists. The command that runs
+  on the instance is `cloud-init status --wait`, then `deploy.sh`. The first version had no wait, and the
+  deploy to such an instance failed with `deploy.sh: not found` (status 127). If the boot did fail, `deploy.sh`
+  is missing and the message says `this instance has not finished booting` and points at the boot log.
+- **On failure it prints the output of every instance that failed.** `aws ssm get-command-invocation` supplies
+  the stdout and stderr of `deploy.sh`. SSM runs the instances in an order of its own, and with `--max-errors 0`
+  the first failure stops the rest, which then end as `Terminated` with nothing to show. The instance the
+  script is waiting on is therefore not necessarily the one that failed: on staging the healthy instance was
+  reported as `Terminated` while the real error was on the other. The script lists all the instances, marks the
+  ones SSM only stopped, and prints the output of the ones that failed on their own. A successful run prints
+  the same output, so the log shows what each instance did.
 - **A deploy that reaches no instance fails.** Probed on staging with a harmless `echo`: SSM answers
   `TargetCount: 0` and status `Pending` both for a command whose tags match an instance and for one whose tags
   match nothing, and it raises no error for the second. A deploy to an environment that is down, or whose

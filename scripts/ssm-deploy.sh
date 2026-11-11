@@ -2,8 +2,8 @@
 # Usage: ssm-deploy.sh <environment> <image-tag>
 #
 # Runs /opt/app/deploy.sh <image-tag> on every instance tagged environment=<environment> and Role=app,
-# through SSM Run Command, and waits for it. cd.yml calls this from the deploy-staging job and from
-# the production job.
+# through SSM Run Command, and waits for it (after waiting for the instance to finish booting, see
+# REMOTE_COMMAND below). cd.yml calls this from the deploy-staging job and from the production job.
 #
 #   <environment>  the value of the instances' "environment" tag: staging or prod
 #   <image-tag>    the short commit SHA that build-and-push pushed to ECR
@@ -47,11 +47,19 @@ EXECUTION_TIMEOUT="${EXECUTION_TIMEOUT:-600}"
 POLL_DELAY="${POLL_DELAY:-5}"
 NO_TARGET_GRACE="${NO_TARGET_GRACE:-60}"
 
+# What runs on each instance. An instance that is still booting already has its SSM agent running and its
+# tags set, so it is targeted, but user_data has not yet written /opt/app/deploy.sh: the first version of
+# this command failed there with "deploy.sh: not found" (status 127). So it waits for cloud-init to finish
+# first. If the boot did fail (it did, when the Snap store was unreachable) deploy.sh is missing, and the
+# message says that instead of "not found". A cloud-init error that left deploy.sh in place is no reason
+# not to deploy, hence the ";" and not "&&". There are no double quotes in it, because it goes into JSON.
+REMOTE_COMMAND="cloud-init status --wait > /dev/null 2>&1; if [ ! -x /opt/app/deploy.sh ]; then echo 'ERROR: this instance has not finished booting: /opt/app/deploy.sh is missing (see /var/log/cloud-init-output.log)' >&2; exit 1; fi; /opt/app/deploy.sh ${TAG}"
+
 echo "==> deploying ${TAG} to the instances tagged environment=${ENVIRONMENT}, Role=app"
 COMMAND_ID=$(aws ssm send-command \
   --document-name AWS-RunShellScript \
   --targets "Key=tag:environment,Values=${ENVIRONMENT}" "Key=tag:Role,Values=app" \
-  --parameters "{\"commands\":[\"/opt/app/deploy.sh ${TAG}\"],\"executionTimeout\":[\"${EXECUTION_TIMEOUT}\"]}" \
+  --parameters "{\"commands\":[\"${REMOTE_COMMAND}\"],\"executionTimeout\":[\"${EXECUTION_TIMEOUT}\"]}" \
   --max-concurrency 1 \
   --max-errors 0 \
   --comment "deploy ${TAG} (GitHub run ${GITHUB_RUN_ID:-manual})" \
@@ -70,6 +78,30 @@ show_output() {
     --query StandardErrorContent --output text || true)
   [ "$out" = "None" ] || [ -z "$out" ] || { echo "--- stdout of ${instance}"; echo "$out"; }
   [ "$err" = "None" ] || [ -z "$err" ] || { echo "--- stderr of ${instance}"; echo "$err"; }
+}
+
+# report_failures: every instance of the command that did not succeed, and the output of the ones that
+# failed on their own. SSM runs the instances in an order of its own, and with --max-errors 0 the first
+# failure stops the rest, which then end as "Terminated" and have nothing to show. The instance this
+# script happens to be waiting on is therefore not necessarily the one that failed (on staging it was
+# the healthy one, reported as Terminated, while the real error was on the other), so all of them are
+# looked at.
+report_failures() {
+  local list instance status details
+  list=$(aws ssm list-command-invocations --command-id "$COMMAND_ID" \
+    --query 'CommandInvocations[].[InstanceId,Status,StatusDetails]' --output text || true)
+  while IFS=$'\t' read -r instance status details; do
+    [ -n "$instance" ] || continue
+    [ "$status" != "Success" ] || continue
+    echo "${instance}: ${status} (${details})" >&2
+    case "$status" in
+      Pending | InProgress | Delayed) continue ;; # not finished: nothing to show yet
+    esac
+    case "$details" in
+      Terminated | Cancelled) ;; # stopped by SSM after another instance failed: nothing to show
+      *) show_output "$instance" ;;
+    esac
+  done <<< "$list"
 }
 
 # wait_for <instance>: returns when deploy.sh has succeeded there, and exits 1 when it has not.
@@ -94,9 +126,7 @@ wait_for() {
         ;;
       *)
         echo "ERROR: deploying ${TAG} on ${instance} ended with status ${status}" >&2
-        aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$instance" \
-          --query '[StatusDetails,ResponseCode]' --output text >&2 || true
-        show_output "$instance"
+        report_failures
         exit 1
         ;;
     esac
