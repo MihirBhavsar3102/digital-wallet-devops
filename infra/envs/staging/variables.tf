@@ -55,6 +55,18 @@ variable "github_repository" {
   }
 }
 
+variable "github_owner_id" {
+  type        = string
+  description = "Numeric id of the GitHub account that owns the repository. Since 15 July 2026 GitHub puts it, and the repository id, in the token subject that the deploy role trusts. Not secret. Look it up with: gh api repos/OWNER/REPO --jq .owner.id"
+  default     = "62109840"
+}
+
+variable "github_repository_id" {
+  type        = string
+  description = "Numeric id of the GitHub repository (see github_owner_id). A repository that is deleted and recreated gets a new id, so this value has to be updated then. Look it up with: gh api repos/OWNER/REPO --jq .id"
+  default     = "1451854102"
+}
+
 # ---------- network ----------
 variable "vpc_cidr" {
   type        = string
