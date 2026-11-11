@@ -168,12 +168,27 @@ Each environment has its own role, `<name_prefix>-github-deploy`:
 | `rds:CreateDBSnapshot` (**prod only**) | The production database and snapshots named `digital-wallet-prod-*` |
 
 Each trust policy checks two claims in the GitHub token: the audience must be `sts.amazonaws.com`, and
-the subject must be exactly `repo:MihirBhavsar3102/digital-wallet-devops:environment:<env>`. In practice:
+the subject must be exactly `repo:MihirBhavsar3102@62109840/digital-wallet-devops@1451854102:environment:<env>`.
+In practice:
 
 - The GitHub Environments must be named exactly `staging` and `prod` (the match is case-sensitive).
 - A workflow job must declare `environment: <env>` and `permissions: id-token: write`.
 - A job from another repository, a fork, or a job with no environment produces a different subject
   and is refused. Production can also require a reviewer's approval on its GitHub Environment.
+
+**The subject carries numeric ids (found in step 2.3).** Since 15 July 2026 GitHub gives repositories created
+after that date an *immutable* subject claim: the numeric owner and repository ids follow the names
+(`repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:NAME`). The first version of these trust policies used the older
+name-only form, which such a token never matches, and the first run of `cd.yml` failed with `Not authorized to
+perform sts:AssumeRoleWithWebIdentity`. The module now builds the subject from `github_repository` and two ids,
+`github_owner_id` and `github_repository_id`, which have defaults in each environment because none is secret.
+The ids make the role stricter: a repository deleted and recreated under the same name gets a new id and cannot
+assume it. In that case, update `github_repository_id`. To check what a repository issues, or to look the ids up:
+
+```
+gh api repos/OWNER/REPO/actions/oidc/customization/sub    # use_immutable_subject and sub_claim_prefix
+gh api repos/OWNER/REPO --jq '{owner_id: .owner.id, repository_id: .id}'
+```
 
 #### Why no AWS access keys live in GitHub
 
@@ -561,7 +576,7 @@ CloudWatch Logs accepts.
 - **Set per environment, with no default**, so each environment has to decide: `environment`, `aws_region`,
   `owner`, `vpc_cidr`, `single_nat_gateway`, the three Auto Scaling sizes, `db_multi_az`,
   `db_backup_retention_period`, `deletion_protection`, `allow_db_snapshot` and `log_retention_days`.
-- **With a default shared by both**: `project`, `github_repository`, `az_count`, `alb_ingress_cidrs`, the two ports
+- **With a default shared by both**: `project`, `github_repository`, `github_owner_id`, `github_repository_id`, `az_count`, `alb_ingress_cidrs`, the two ports
   and two health check paths, `instance_type`, `db_name`, `db_instance_class`, `db_allocated_storage`,
   `db_engine_version` and `extra_tags`.
 - **Tags.** The provider's `default_tags` are the four standard tags (`project`, `environment`, `managed-by`,
@@ -977,7 +992,7 @@ gh variable set NAME_PREFIX  --env staging --body digital-wallet-staging
 ### Decisions
 
 - **The job must declare the environment.** The deploy role's trust policy accepts one token subject,
-  `repo:<owner>/<repo>:environment:staging` (see [GitHub Actions deploy roles](#github-actions-deploy-roles-oidc)),
+  `repo:<owner>@<owner id>/<repo>@<repo id>:environment:staging` (see [GitHub Actions deploy roles](#github-actions-deploy-roles-oidc)),
   and GitHub only puts `environment:staging` in the subject when the job names the environment. Without that
   line AWS refuses the login. The alternative, a trust policy that also accepts `ref:refs/heads/main`, would
   have widened what the role trusts. A side effect: the run page shows a deployment to `staging` as soon as the
