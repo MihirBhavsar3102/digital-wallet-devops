@@ -969,12 +969,13 @@ the workflow. For example `docker run --rm -i hadolint/hadolint < app/backend/Do
 `trivy fs app --scanners vuln --severity HIGH,CRITICAL`, and `gitleaks git --baseline-path
 .gitleaks-baseline.json`. The Terraform checks are listed under [Quality gates](#quality-gates).
 
-## Continuous delivery: build, push and deploy to staging (steps 2.3 and 2.4)
+## Continuous delivery: build, push, deploy and promote (steps 2.3 to 2.5)
 
 `.github/workflows/cd.yml` runs when a commit lands on `main`, which is when a pull request is merged
-([ci.yml](#continuous-integration-pull-requests) has already checked it). It has two jobs so far:
-`build-and-push` (step 2.3) and `deploy-staging` (step 2.4, [below](#deploy-to-staging-step-24)), which uses the
-`tag` output of the first. The production deploy follows in step 2.5.
+([ci.yml](#continuous-integration-pull-requests) has already checked it). It has three jobs, in a chain:
+`build-and-push` (step 2.3), `deploy-staging` (step 2.4, [below](#deploy-to-staging-step-24)) and
+`deploy-production` (step 2.5, [below](#production-step-25)), which waits for a person to approve it.
+The last two use the `tag` output of the first.
 
 ### Build and push: `build-and-push`
 
@@ -1123,11 +1124,116 @@ pipeline depends on:
 - **The role, its variables and the environment** keep their names, so `AWS_ROLE_ARN`, `AWS_REGION` and
   `NAME_PREFIX` stay valid.
 
+### Production (step 2.5)
+
+`deploy-production` needs `build-and-push` and `deploy-staging` (the first is listed too, because a job can only
+read the outputs of the jobs it names), and runs in the `production` GitHub Environment.
+
+**The approval gate.** Settings, Environments, `production` holds the rules, which were set with the GitHub API
+and can be seen and changed on that page:
+
+| Rule | Setting |
+|------|---------|
+| Required reviewers | `MihirBhavsar3102`. The job pauses before any step until a reviewer approves it, and the run page shows a **Review deployments** prompt (this is the screenshot for the demo) |
+| Prevent self-review | off, because this is a single-person repository and GitHub would otherwise leave nobody able to approve. With a second person, add them as a reviewer and turn it on |
+| Deployment branches | `main` only. A workflow from any other branch cannot enter the environment, and so cannot use the role |
+| Wait timer | none. It is optional: set one on the same page to give a reviewer time to cancel after approving |
+
+The gate also protects the AWS role. Production's deploy role trusts only a token whose subject ends in
+`environment:production`, and GitHub only issues that to a job that has passed the environment's rules.
+
+**What the job does after the approval, in order:**
+
+1. **Checks its configuration**: the variables below must be set.
+2. **Logs in** with production's role, then to ECR.
+3. **Promotes the release that passed staging** (`scripts/promote-image.sh`, 29 tests). The two environments
+   have separate repositories, so production gets the image that was built, scanned and smoke-tested for
+   staging and not a second build of the commit. The two images are copied inside ECR and the script checks that
+   each copy has the same digest as its source. A release that is not in staging's repositories is refused
+   before anything is copied, an image that is already in production's repositories is left alone (immutable
+   tags), and an AWS error is a failure.
+4. **Snapshots the database** with `aws rds create-db-snapshot` and waits with
+   `aws rds wait db-snapshot-available`. The snapshot is named `digital-wallet-prod-pre-<tag>-<run id>-<attempt>`:
+   it has to start with the name prefix, which is what the role's permission matches, and it is unique per run
+   attempt. Migrations are part of a deploy and a rollback of the code cannot undo them, so the deploy does not
+   start until the snapshot is available. These manual snapshots are kept until someone deletes them: how long
+   to keep them is part of the backup strategy (step 4.3).
+5. **Deploys** with `scripts/ssm-deploy.sh prod <tag>`, the script of the staging job, to the instances tagged
+   `environment=prod`, one at a time.
+6. **Smoke-tests** through the production load balancer, with the same script.
+7. **Records the tag** in `/digital-wallet-prod/deployed-tag`, and the summary of the run page lists the tag,
+   the snapshot and the address.
+
+**Variables** on the `production` GitHub Environment, none of them a secret:
+
+| Variable | Value |
+|----------|-------|
+| `AWS_ROLE_ARN` | The ARN of the role `digital-wallet-prod-github-deploy` (set; the role exists once production is applied) |
+| `AWS_REGION` | `ap-south-1` (set) |
+| `NAME_PREFIX` | `digital-wallet-prod` (set) |
+| `SOURCE_NAME_PREFIX` | `digital-wallet-staging`, where the image that passed staging is (set) |
+| `ALB_URL` | `http://` and the Terraform output `alb_dns_name` of `infra/envs/prod`. **Not set**, because production has not been applied: the job's first step stops with a message that says so |
+
+**Decisions:**
+
+- **The environment is named `production`, the Terraform environment `prod`.** They disagreed: the role trusted
+  `environment:prod`, so no job in the `production` environment could ever have assumed it, and the login would
+  have failed at the first approved run. `github_environment` (a variable of both environments, defaulting to the
+  environment's own name) lets `prod.tfvars` set `production`. The staging and prod Terraform files stay identical,
+  and the differences are in the tfvars.
+- **Promote, do not rebuild.** What runs in production is what ran on staging. The copy uses
+  `docker buildx imagetools create --prefer-index=false`. Trying it on staging showed that without the flag, a
+  single image is wrapped in a new image index, which has a different digest: a look-alike, not the same image.
+  The script compares the digests, so a copy that is not identical fails instead of being deployed.
+- **Concurrency is per deploy job.** The workflow-wide group of step 2.3 would hold every later run behind a run
+  that is waiting for an approval, which can take days. `deploy-staging` and `deploy-production` have a group
+  each (`cancel-in-progress: false`): two deploys to one environment never overlap, a deploy that has started is
+  never cancelled, and of the runs queued for one environment only the newest waits. The consequence is that
+  an older run can still be waiting for approval when a newer one has already been deployed to staging.
+  Approve the newest run and reject the older ones.
+- **Permissions.** Besides the push rights from step 2.3, the production role may read staging's two repositories
+  (for the promotion) and describe snapshots (for the wait). Everything else is as for staging. See
+  [GitHub Actions deploy roles](#github-actions-deploy-roles-oidc).
+
+#### Not run end to end: production has never been applied
+
+Production costs about $170 a month and is stood up for a demo only, so the steps after the approval have not
+run against real production resources. What has been checked instead:
+
+- `scripts/promote-image.sh` against a fake `aws` and `docker` (29 checks), and `docker buildx imagetools create`
+  itself against staging's real ECR: it works with the registry, and it is how the digest finding above was made.
+- `ssm-deploy.sh` and `smoke-test.sh` are the scripts the staging job runs for real.
+- `terraform plan` of production against an empty local state: the trust condition is
+  `repo:MihirBhavsar3102@62109840/digital-wallet-devops@1451854102:environment:production`, the promotion policy
+  names staging's two repositories and nothing else, and the snapshot policy has both the create and the wait
+  permission.
+- The snapshot step's shell, run against a fake `aws`: the name it builds is a valid RDS identifier and matches
+  the role's `digital-wallet-prod-*` pattern.
+- **Not checked:** production's role assuming through the approval, the cross-repository copy, the snapshot and
+  its wait, `ssm:SendCommand` on the `environment=prod` tag, and the deploy to two instances.
+
+#### Standing production up for a demo
+
+```
+cd infra/envs/prod
+terraform init
+terraform apply "-var-file=prod.tfvars"
+gh variable set ALB_URL --env production --body "http://$(terraform output -raw alb_dns_name)"
+```
+
+Then push a commit to `main` (or re-run the latest CD run), wait for staging to pass, and approve the
+deployment. Staging has to be up when production deploys, because that is where the image comes from. The
+first deploy to production finds its repositories empty, which is what the promotion is for. Afterwards, to
+stop paying for production: its ECR repositories keep their images (`deletion_protection`), so empty them first
+or `terraform destroy` stops with an error, and delete the pre-deploy snapshots you no longer need.
+
 ### Not done
 
-- **Production's registry.** The two environments have separate repositories, and this job pushes to
-  staging's only. Production has to get the same image another way, which is a decision for step 2.5
-  (copy the image that passed staging, rather than build it a second time).
+- **A second reviewer and a wait timer** for production. The repository has one maintainer, so the reviewer
+  can approve their own deployment. Both can be added on the environment's page without changing the workflow.
+- **Restricting `staging` to `main`** as well. Production already is (see above). The staging role trusts any job
+  in the `staging` environment, so a workflow on another branch that names it could use the role. That belongs
+  to the hardening step (2.8).
 - **An SBOM and image signing** (for example Syft or Trivy for the SBOM and cosign for the signature) are not
   done. They are listed here for the future-improvements list of the final write-up. ECR's own scan on push
   still runs on every pushed image.
