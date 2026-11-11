@@ -27,6 +27,12 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # Prisma is held at 6.0.1 on purpose (see "Engine version" in the README). The first weekly pull
+      # request proposed 6.0.1 to 6.19.3, which pulls in deepmerge-ts 7.1.5 (CVE-2026-40345, HIGH, fixed
+      # only in 8.0.0), so CI rightly blocked it. Upgrade Prisma as its own tested change, then remove
+      # these two entries.
+      - dependency-name: prisma
+      - dependency-name: "@prisma/client"
 
   - package-ecosystem: npm
     directory: /app/frontend
