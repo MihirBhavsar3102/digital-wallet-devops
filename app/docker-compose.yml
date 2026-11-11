@@ -1,57 +1,63 @@
+# Local use only. AWS runs the same images through scripts/deploy.sh, not through this file.
+#
+# Secrets come from app/.env, which git ignores (copy .env.example and fill it in). Compose stops
+# with a clear message if a value is missing.
+#
+#   docker compose up --build        # db, then migrations, then backend and frontend
+#   docker compose down -v           # also drops the database volume (needed once if the
+#                                    # password in .env changed, because Postgres only reads it
+#                                    # when the volume is first created)
+#
+# The frontend is served on :8080 and the backend on :8081. Locally nothing routes /api like the
+# load balancer does on AWS, so this frontend image is built to call the backend's full URL (which
+# the backend's CORS setting allows). The image that goes to ECR is built with the relative /api.
+
 services:
+  db:
+    image: postgres:17 # the same major version as RDS
+    environment:
+      POSTGRES_USER: pgadmin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in app/.env}
+      POSTGRES_DB: digital_wallet
+    ports:
+      - "127.0.0.1:6432:5432" # reachable from this machine only, for psql and the integration tests
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgadmin -d digital_wallet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: applies the migrations like deploy.sh does, from the same image, before the app starts.
+  migrate:
+    build: ./backend
+    command: ["node_modules/.bin/prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://pgadmin:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in app/.env}@db:5432/digital_wallet
+    depends_on:
+      db:
+        condition: service_healthy
+
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    build: ./backend
     ports:
       - "8081:8081"
     environment:
-      DATABASE_URL: postgresql://pgadmin:1234@db:5432/digital_wallet
-      JWT_SECRET_KEY: fa7910286fe158fe1712b717a420ad5af92397cd6a081f45dec4840a20c1b4e3
-      PORT: 8081
-    volumes:
-      - ./backend:/app
-      - /app/node_modules
+      PORT: "8081"
+      DATABASE_URL: postgresql://pgadmin:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in app/.env}@db:5432/digital_wallet
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY in app/.env}
     depends_on:
-      - db
+      migrate:
+        condition: service_completed_successfully
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:8081/api
     ports:
       - "8080:80"
-    environment:
-      VITE_API_BASE_URL: http://localhost:8081/api
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-
-  db:
-    image: postgres:15
-    container_name: postgres_db
-    ports:
-      - "6432:5432"
-    environment:
-      POSTGRES_USER: pgadmin
-      POSTGRES_PASSWORD: 1234
-      POSTGRES_DB: digital_wallet
-    volumes:
-      - db_data:/var/lib/postgresql/data
-
-  prisma-studio:
-    image: node:20
-    working_dir: /app
-    ports:
-      - "5555:5555"
-    environment:
-      DATABASE_URL: postgresql://pgadmin:1234@db:5432/digital_wallet
-    volumes:
-      - ./backend:/app
-    command: >
-      sh -c "npm install && npx prisma generate && npx prisma studio --port 5555"
-    depends_on:
-      - db
 
 volumes:
   db_data:
