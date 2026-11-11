@@ -19,6 +19,9 @@ asg_min_size         = 2
 asg_desired_capacity = 2
 asg_max_size         = 3
 
+# load balancer
+backend_health_check_path = "/api/health" # the real app's public route; the first-boot placeholder answers it too
+
 # database
 db_instance_class          = "db.t4g.micro"
 db_multi_az                = true

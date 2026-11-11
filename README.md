@@ -4,8 +4,9 @@ A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app an
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
 > **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR,
-> IAM, compute, the load balancer, the database, the staging/production variables and the quality gates
-> are in place. The pipeline and monitoring are not written yet.
+> IAM, compute, the load balancer, the database, the staging/production variables, the quality gates,
+> the application images, `deploy.sh` and a first manual deploy are in place. The pipeline and monitoring
+> are not written yet.
 
 ## Terraform state
 
@@ -516,6 +517,17 @@ refused before any AWS call: `log_retention_days = 10`, a backend port equal to 
 size above the maximum, `alb_ingress_cidrs = ["not-a-cidr"]`, `instance_type = "t4g.small"`, and an
 `extra_tags` map that contains `owner`.
 
+### Destroy and rebuild (step 1.13)
+
+Staging was destroyed with `terraform destroy` and rebuilt with `terraform apply`, to show that the code
+is the infrastructure. The rebuild took about **10 to 12 minutes**, timed by hand, most of it creating the
+database. Two things follow from a rebuild. The ECR repositories come back empty, so the application has to
+be deployed again, and the load balancer gets a new DNS name.
+
+That time was measured before the instances were made to wait for the database (they now read its address
+and secret ARN at launch, see [deploy.sh](#deploysh)). Their start no longer overlaps with the database
+creation, so a rebuild may take longer. This has not been measured: time the next one again.
+
 ### Cost, and running production at staging size
 
 In Mumbai (AWS price list API) a NAT gateway is $0.056 per hour, the load balancer $0.0239, a `t3.small`
@@ -582,6 +594,89 @@ The backend signs its tokens with a JWT key. `infra/modules/secrets/` creates a 
 - The JWT key in `app/docker-compose.yml` is the upstream project's demo value and is public. It must never be
   used in AWS, and the pipeline step removes it from the compose file.
 
+## Application images and deploy
+
+Each instance runs two containers, the backend and the frontend, pulled from ECR. `scripts/deploy.sh`
+puts them there. Step 1.14 did it by hand once; the pipeline in Part 2 automates the same steps.
+
+### Images
+
+- **Backend** (`app/backend/Dockerfile`): three stages on one pinned base, `node:22.23.4-bookworm-slim`
+  (Node 20 reached end of life in April 2026; Debian rather than Alpine, because Prisma's engines and
+  bcrypt's prebuilt binary both target glibc). It runs `node dist/main.js` as the non-root `node` user on
+  port 8081, set by `PORT`. Production dependencies are installed on their own and the Prisma client is
+  generated after that install.
+- **OpenSSL in every stage.** The slim image has no OpenSSL, and Prisma picks its engine binaries by the
+  OpenSSL it detects. Without it the build stages baked in `openssl-1.1.x` engines, which do not load once
+  OpenSSL 3 is present at runtime. A shared `base` stage installs it, so the engines are
+  `debian-openssl-3.0.x` and work with no network.
+- **Production start.** `@nestjs/swagger` is a runtime dependency (the app imports it), and
+  `tsconfig.build.json` compiles only `src/**`, so the entry point is `dist/main.js`.
+- **Frontend** (`app/frontend/Dockerfile`): a Node build stage, then `nginx:1.30.6-alpine` on port 80.
+  `VITE_API_BASE_URL` is a build argument that defaults to the relative `/api`, so one image works behind
+  any load balancer hostname. nginx falls back to `index.html` for client-side routes and writes a JSON
+  access log to stdout. It has no `/api` proxy: the load balancer sends `/api/*` to the backend first.
+- **Health route.** `GET /api/health` is public (the global auth guard would otherwise answer 401) and
+  returns `{"status":"ok"}`. The backend target group checks it (`backend_health_check_path`).
+- **Logs.** The auth guard no longer prints request headers, bearer tokens or the decoded payload, because
+  Part 3 sends the logs to CloudWatch.
+
+### deploy.sh
+
+`deploy.sh <tag>` runs on the instance as root (through SSM Run Command). It logs in to ECR, pulls both
+images, reads the secrets into its own environment, applies the database migrations from the **new**
+backend image, restarts the containers with Docker Compose, and then checks `/api/health` and the frontend
+on the instance. Every failure exits non-zero.
+
+- **A failed migration stops the deploy before anything is restarted**, so the running version stays up.
+  `prisma migrate deploy` is idempotent, so on the second instance it has nothing to apply. Migrations
+  therefore have to work for the old and the new code at once.
+- **Secrets never reach the disk.** The database secret is read by ARN and the JWT secret by name. The
+  password is percent-encoded into `DATABASE_URL`, and both values reach Compose through the environment
+  (`DATABASE_URL:` with no value in the compose file), so a `$` or `#` in a secret cannot corrupt a file.
+- **`/opt/app/instance.env`** is written by `user_data` and holds the region, account ID, name prefix, both
+  ports and the database host, port, name and secret ARN. The instance role can only read secrets by exact
+  ARN and cannot look anything up, and RDS chooses its secret's name, so these are handed over at launch.
+  None of them is secret. Applying a change to this file, or to `deploy.sh` (which is embedded in
+  `user_data`), replaces the instances once.
+- **Safety.** A lock stops two deploys overlapping, the tag is validated, and unused images older than a week
+  are pruned, so a rollback to a recent tag is fast.
+- **Tests.** `scripts/tests/deploy.test.sh` runs the script against fake `aws`, `docker` and `curl`
+  commands (26 checks): the order of the steps, URL-encoding, no secrets on disk, the failed-migration and
+  failed-health paths, bad input and the lock. It needs Linux tools, so run it in a container:
+  `docker run --rm -v "$PWD:/repo:ro" python:3-slim bash /repo/scripts/tests/deploy.test.sh`.
+
+### Manual first deploy (step 1.14)
+
+The images are tagged with the short commit hash (`git rev-parse --short HEAD`). ECR tags are immutable,
+so a rebuild of the same commit needs a new tag such as `<hash>-2`. After `terraform apply` had replaced the
+instance, the images were pushed and `deploy.sh` was run through
+`aws ssm send-command --document-name AWS-RunShellScript`, which is also what the pipeline will do.
+
+### Checked on staging
+
+- The apply changed 3 resources in place (the backend health check path, the launch template and the Auto
+  Scaling group) and nothing else. The instance refresh took about six minutes. The new instance had the new
+  `instance.env` and `deploy.sh`.
+- The first deploy applied all 10 migrations to RDS from the production image over TLS
+  (`sslmode=require`) with no certificate error, and finished in under 30 seconds with both images pulled.
+- Both target groups reported `healthy`, the backend one on `/api/health`. Through the load balancer, `/`
+  and `/api/health` returned 200, `/api/users` without a token returned 401 (the real backend, not the
+  placeholder), and a deep link such as `/signup` loaded.
+- A user was registered, logged in, given an account, and made a deposit and a transfer, both through the
+  API and in a browser. Every browser call went to a relative `/api/...` on the load balancer's host and
+  returned 2xx. Balances were exact (1000 + 200 - 300 = 900 in the browser run).
+- Re-running the same tag took 9 seconds with no pending migrations. A second tag took 21 seconds, and so did
+  the rollback to the first, with the data intact.
+- The compose file on the instance contains no password, and nothing under `/opt/app` holds a secret value.
+
+### Open decision: password rotation
+
+RDS rotates the master password every 7 days, and `deploy.sh` reads it at deploy time. A running backend
+keeps the password it started with, so after a rotation it cannot open new connections until the next
+deploy or restart. Either turn rotation off (`rotation_enabled = false`) or accept and document it as a
+known limit. This is not decided yet.
+
 ## Repo layout
 
 | Path | Purpose |
@@ -591,7 +686,7 @@ The backend signs its tokens with a JWT key. `infra/modules/secrets/` creates a 
 | `infra/modules/` | Reusable Terraform modules |
 | `infra/envs/staging/`, `infra/envs/prod/` | One folder per environment, both calling the same modules |
 | `.github/workflows/` | GitHub Actions pipelines |
-| `scripts/` | Deploy and smoke-test scripts |
+| `scripts/` | The deploy script and its tests (`scripts/tests/`); the smoke test comes with the pipeline |
 | `monitoring/` | CloudWatch agent configuration |
 | `docs/` | Challenges log and approach documentation |
 | `.tflint.hcl`, `.checkov.yaml`, `.pre-commit-config.yaml`, `.gitleaks-baseline.json` | Quality gate configuration (see [Quality gates](#quality-gates)) |
