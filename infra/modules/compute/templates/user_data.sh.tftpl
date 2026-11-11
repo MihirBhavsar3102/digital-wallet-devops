@@ -10,7 +10,7 @@ snap wait system seed.loaded
 sed -i '/^URIs:/ s|http://|https://|g' /etc/apt/sources.list.d/*.sources || true
 
 apt-get update
-apt-get install -y ca-certificates curl gnupg
+apt-get install -y ca-certificates curl gnupg unzip
 
 # --- Docker Engine and the Compose plugin (Docker's official apt repository)
 install -m 0755 -d /etc/apt/keyrings
@@ -21,8 +21,17 @@ apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable --now docker
 
-# --- AWS CLI: deploy.sh uses it for the ECR login and Secrets Manager
-snap install aws-cli --classic
+# --- AWS CLI: deploy.sh uses it for the ECR login and Secrets Manager.
+# AWS's own installer, not "snap install aws-cli": on 2026-11-11 the Snap store was unreachable (from this
+# VPC and from elsewhere), "snap install" failed with "unable to contact snap store", and because this
+# script stops at the first error no instance could finish booting: each one failed its health check
+# and was replaced by one that failed the same way. awscli.amazonaws.com is AWS's own distribution
+# point. The installer puts the command in /usr/local/bin, which is on every shell's default PATH,
+# including the one SSM Run Command starts.
+curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install
+rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # --- CloudWatch agent (its configuration is added in the monitoring step)
 curl -fsSL -o /tmp/amazon-cloudwatch-agent.deb https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
@@ -81,7 +90,6 @@ docker run -d --name placeholder --restart unless-stopped \
 # replacement instance (a failed health check, an instance refresh, a scale-out) would serve the
 # placeholder until the next deploy. "none" means nothing has been deployed yet. A failure here is not
 # fatal: the placeholder keeps the instance healthy for the load balancer and the next deploy fixes it.
-export PATH="$PATH:/snap/bin"
 RELEASE_TAG=$(aws ssm get-parameter --region ${region} --name "/${name_prefix}/deployed-tag" --query Parameter.Value --output text) || RELEASE_TAG=none
 if [ "$RELEASE_TAG" != "none" ]; then
   /opt/app/deploy.sh "$RELEASE_TAG" || echo "deploy of $RELEASE_TAG failed, the placeholder stays up"
