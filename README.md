@@ -856,7 +856,7 @@ checks: nothing in it deploys.
 | `secret-scan` | gitleaks on the full history, against `.gitleaks-baseline.json` | a new secret |
 | `image-build-scan` | Builds both images (nothing is pushed) and scans them with trivy, HIGH and CRITICAL that have a fix | any such finding |
 | `iac-checks` | `terraform fmt`, `validate` in `bootstrap`, `staging` and `prod`, tflint and checkov | any of them reports a problem. Runs only when `infra/`, `.tflint.hcl`, `.checkov.yaml` or `ci.yml` changed |
-| `script-tests` | The tests for `deploy.sh` and `smoke-test.sh` | a check fails |
+| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh` and `ecr-tag-status.sh` | a check fails |
 
 **How it is built.**
 
@@ -934,6 +934,94 @@ pull request passes through the same checks as any other.
 the workflow. For example `docker run --rm -i hadolint/hadolint < app/backend/Dockerfile`,
 `trivy fs app --scanners vuln --severity HIGH,CRITICAL`, and `gitleaks git --baseline-path
 .gitleaks-baseline.json`. The Terraform checks are listed under [Quality gates](#quality-gates).
+
+## Continuous delivery: build and push (step 2.3)
+
+`.github/workflows/cd.yml` runs when a commit lands on `main`, which is when a pull request is merged
+([ci.yml](#continuous-integration-pull-requests) has already checked it). It has one job so far,
+`build-and-push`. The deploy jobs of steps 2.4 and 2.5 will follow it and use its `tag` output.
+
+What the job does, in order:
+
+1. **Checks its configuration.** The three variables below must be set, and the job says which one is missing.
+2. **Tags the commit** with its first seven characters (`${GITHUB_SHA::7}`). `git rev-parse --short` was not
+   used, because it returns a longer hash when seven would be ambiguous, and the tag has to be predictable.
+3. **Logs in to AWS** with `aws-actions/configure-aws-credentials` and `role-to-assume`, then to ECR with
+   `aws-actions/amazon-ecr-login`. There is no stored key (see
+   [Why no AWS access keys live in GitHub](#why-no-aws-access-keys-live-in-github)).
+4. **Asks ECR which of the two tags exist** (`scripts/ecr-tag-status.sh`) and keeps the ones that do not.
+5. **Builds those images with Buildx**, loaded into the runner's Docker and not pushed. The frontend gets
+   `VITE_API_BASE_URL=/api` as a build argument, because Vite bakes it into the bundle.
+6. **Scans them with trivy before anything is pushed**, with the same gate as the `image-build-scan` job in
+   `ci.yml`: HIGH and CRITICAL findings that have a fix fail the job.
+7. **Pushes them** and publishes the tag as the job output `tag`. A summary on the run page says which image
+   was pushed and which was already there.
+
+### Set up once: the `staging` GitHub Environment
+
+The job declares `environment: staging`, and these variables live on that environment (Settings, Environments,
+staging, Variables). None is a secret.
+
+| Variable | Value |
+|----------|-------|
+| `AWS_ROLE_ARN` | The Terraform output `github_deploy_role_arn` of `infra/envs/staging` |
+| `AWS_REGION` | `ap-south-1` |
+| `NAME_PREFIX` | `digital-wallet-staging`, so the repositories are `<prefix>-backend` and `<prefix>-frontend` |
+
+```
+gh variable set AWS_ROLE_ARN --env staging --body "<role arn>"
+gh variable set AWS_REGION   --env staging --body ap-south-1
+gh variable set NAME_PREFIX  --env staging --body digital-wallet-staging
+```
+
+### Decisions
+
+- **The job must declare the environment.** The deploy role's trust policy accepts one token subject,
+  `repo:<owner>/<repo>:environment:staging` (see [GitHub Actions deploy roles](#github-actions-deploy-roles-oidc)),
+  and GitHub only puts `environment:staging` in the subject when the job names the environment. Without that
+  line AWS refuses the login. The alternative, a trust policy that also accepts `ref:refs/heads/main`, would
+  have widened what the role trusts. A side effect: the run page shows a deployment to `staging` as soon as the
+  images are pushed, before any instance has been touched. Step 2.4's `deploy-staging` job will show the real one.
+- **A tag that already exists is skipped, not an error.** The repositories have immutable tags, so pushing the
+  same tag twice is rejected. A re-run of a commit, whether by hand or because a later job failed, therefore
+  asks first and skips what is there. Each image is checked on its own, so a run that pushed the backend and
+  stopped before the frontend is repaired by a re-run, which builds only the frontend. The alternative, to try
+  the push and ignore the "already exists" error, would pay for a build and a scan first and would also hide a
+  real rejection. The check needs `ecr:DescribeImages`, which was added to the deploy role in this step.
+- **"Cannot tell" is not "absent".** `ecr-tag-status.sh` treats only `ImageNotFoundException` as absent. An
+  expired login, a missing permission or a repository that does not exist stops the job, because reading
+  one of them as absent would lead to a push that cannot work.
+- **What is pushed is what was scanned.** The builds load the image locally, trivy scans it, and `docker push`
+  sends that same image. A second build for the push could in principle differ from the one that was scanned.
+  Both images are scanned before either is pushed, so a finding in one cannot leave the other in ECR.
+- **Build cache.** Buildx keeps its layers in GitHub's cache service, one scope per image
+  (`type=gha,mode=max`). An unchanged dependency layer is restored instead of rebuilt. `ignore-error=true` keeps
+  an outage of the cache service from failing a release. The first run on `main` starts cold.
+- **One run at a time, never cancelled.** The workflow's concurrency group queues runs and does not cancel one
+  that has started, because stopping a push or a deploy half way is worse than waiting. If several commits
+  land while a run is going, GitHub keeps only the newest waiting run, which ships the latest `main`.
+- **Pinned and least privilege.** Every action is pinned to a full commit SHA, the workflow token is read-only,
+  and the one job that needs more asks for exactly `id-token: write` and `contents: read`. trivy runs as the same
+  image, pinned by digest, as in `ci.yml`: when the digest is updated there, update it here too.
+
+### Re-running a commit
+
+| State of ECR when the job starts | What the job does |
+|----------------------------------|-------------------|
+| Neither tag exists (a new commit) | Builds, scans and pushes both |
+| Both tags exist | Builds and pushes nothing, and still outputs the tag |
+| One tag exists | Builds, scans and pushes only the other |
+| The check itself fails | Stops with AWS's message |
+
+### Not done
+
+- **Production's registry.** The two environments have separate repositories, and this job pushes to
+  staging's only. Production has to get the same image another way, which is a decision for step 2.5
+  (copy the image that passed staging, rather than build it a second time).
+- **An SBOM and image signing** (for example Syft or Trivy for the SBOM and cosign for the signature) are not
+  done. They are listed here for the future-improvements list of the final write-up. ECR's own scan on push
+  still runs on every pushed image.
+- **Scan results are not uploaded as SARIF** to GitHub's Security tab, the same as in `ci.yml`.
 
 ## Credits
 
