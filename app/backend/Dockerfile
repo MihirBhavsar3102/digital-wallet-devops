@@ -41,7 +41,9 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json ./
 # schema + migrations: deploy.sh runs "prisma migrate deploy" from this image before restarting.
 COPY --chown=node:node prisma ./prisma
-USER node
+# The base image's non-root "node" user (uid and gid 1000), as numbers so that the host and
+# Kubernetes-style policies can verify it is not root.
+USER 1000:1000
 EXPOSE 8081
 # node directly, not npm, so SIGTERM from "docker stop" reaches the app.
 CMD ["node", "dist/main.js"]
