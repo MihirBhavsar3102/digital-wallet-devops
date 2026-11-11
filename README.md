@@ -1352,6 +1352,24 @@ The plan's test is a pull request with a deliberately failing test. Branch from 
 the pull request without merging and delete the branch. To test `cd.yml`'s notice, reject the production
 deployment of a run that waits for approval.
 
+### Checked (2026-11-11)
+
+Both paths were run for real, and both e-mails were received in the inbox (not the spam folder).
+
+- **`ci.yml`, a pull request.** A draft pull request (#60, closed without merging) added a test that fails on
+  purpose. Only `unit-tests` failed, the other eight jobs passed, and `notify` ran for 9 seconds. It assumed the
+  role through OIDC with the `pull_request` subject and sent `[digital-wallet-devops] CI failed: unit-tests (PR #60)`
+  with every job's result, the pull request, branch, actor, commit link and run link.
+- **`cd.yml`, a run on `main`.** The production deployment of a waiting run was rejected. `deploy-production` failed,
+  `notify` assumed the role with the `ref:refs/heads/main` subject and sent
+  `[digital-wallet-devops] CD failed: deploy-production (main)`, and `announce-production` was skipped, as it
+  should be. This is the case the "Rejecting a production deployment sends an e-mail" note above describes.
+- **SNS** counted 2 messages published and 0 failed.
+
+**Not checked:** the e-mail for a successful production deploy (it needs production to be applied), and the two
+conditions that leave `ci.yml`'s notify job out for a fork's and a Dependabot pull request, which only a real one
+of those would exercise.
+
 ### Not done
 
 - **Slack.** Not wanted.
