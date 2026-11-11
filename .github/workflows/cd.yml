@@ -1,13 +1,16 @@
 name: CD
 
 # Runs when a commit lands on main, which is when a pull request is merged. ci.yml has already checked
-# the change, so this workflow ships it. Step 2.3 is the first job: build both images, scan them and
-# push them to ECR tagged with the short commit SHA. Deploying that tag is added in steps 2.4 and 2.5.
+# the change, so this workflow ships it:
+#   build-and-push   builds both images, scans them and pushes them to ECR tagged with the short commit SHA
+#   deploy-staging   deploys that tag to the staging instances through SSM, smoke-tests it through the load
+#                    balancer, and records the tag as the last good release
+# The production deploy, behind a manual approval, follows in step 2.5.
 on:
   push:
     branches: [main]
 
-# Read-only unless a job asks for more (build-and-push adds id-token: write for the AWS login).
+# Read-only unless a job asks for more (the jobs below add id-token: write for the AWS login).
 permissions:
   contents: read
 
@@ -200,4 +203,75 @@ jobs:
               esac
               echo "- \`${REGISTRY}/${NAME_PREFIX}-${name}:${TAG}\`: ${result}"
             done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-staging:
+    name: deploy-staging
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same environment, and so the same role and variables, as build-and-push.
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      NAME_PREFIX: ${{ vars.NAME_PREFIX }}
+      # http://<load balancer DNS name>, the Terraform output alb_dns_name of infra/envs/staging. A rebuilt
+      # environment gets a new load balancer, so this has to be set again after every rebuild (README).
+      ALB_URL: ${{ vars.ALB_URL }}
+      IMAGE_TAG: ${{ needs.build-and-push.outputs.tag }}
+    steps:
+      - name: The staging environment is configured
+        run: |
+          status=0
+          for name in AWS_ROLE_ARN AWS_REGION NAME_PREFIX ALB_URL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The variable $name is not set on the GitHub Environment 'staging' (Settings, Environments)."
+              status=1
+            fi
+          done
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "::error::build-and-push did not output an image tag."
+            status=1
+          fi
+          exit "$status"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Runs /opt/app/deploy.sh <tag> on the instances tagged environment=staging and Role=app, one at a
+      # time, and stops at the first failure. It fails when no instance takes the command. See the script.
+      - name: Deploy to the staging instances
+        run: scripts/ssm-deploy.sh staging "$IMAGE_TAG"
+
+      # From the runner, through the public load balancer: what a user would reach, not what the
+      # instance says about itself. It checks that the page is the app and not the placeholder.
+      - name: Smoke test through the load balancer
+        run: scripts/smoke-test.sh "$ALB_URL"
+
+      # Only a release that passed the smoke test is recorded. A replacement instance reads this at boot
+      # and deploys the tag, so it converges to the last good version and not to the placeholder.
+      - name: Record the tag as the last good release
+        run: |
+          aws ssm put-parameter --name "/${NAME_PREFIX}/deployed-tag" --value "$IMAGE_TAG" \
+            --type String --overwrite > /dev/null
+          echo "/${NAME_PREFIX}/deployed-tag is now ${IMAGE_TAG}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Staging runs \`${IMAGE_TAG}\`"
+            echo
+            echo "- Deployed to the instances tagged \`environment=staging\`, one at a time"
+            echo "- Smoke test passed through \`${ALB_URL}\`"
+            echo "- Recorded in \`/${NAME_PREFIX}/deployed-tag\`, which new instances deploy at boot"
           } >> "$GITHUB_STEP_SUMMARY"

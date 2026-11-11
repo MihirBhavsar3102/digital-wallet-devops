@@ -149,6 +149,7 @@ privilege, with no wildcard on anything that supports resource-level permissions
 | ECR pull: `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability` | This environment's two repositories only |
 | `ecr:GetAuthorizationToken` | `*`, because AWS does not support scoping this action to a resource |
 | `secretsmanager:GetSecretValue` | The RDS-managed database secret and the [JWT secret](#jwt-secret) only, by exact ARN |
+| `ssm:GetParameter` (added in step 2.4) | The one parameter `/<name_prefix>/deployed-tag` only: the tag of the last release that passed its smoke test, read at boot (see [First boot](#first-boot)) |
 
 ### GitHub Actions deploy roles (OIDC)
 
@@ -164,7 +165,8 @@ Each environment has its own role, `<name_prefix>-github-deploy`:
 | ECR push: `BatchCheckLayerAvailability`, `InitiateLayerUpload`, `UploadLayerPart`, `CompleteLayerUpload`, `PutImage` | This environment's two repositories only |
 | `ecr:DescribeImages` (added in step 2.3) | This environment's two repositories only. Read-only: lets the pipeline ask whether a commit's tag is already pushed, so that a re-run skips the push |
 | `ssm:SendCommand` | The `AWS-RunShellScript` document, and only instances tagged `environment=<env>` |
-| `ssm:GetCommandInvocation` | `*`, to read command results |
+| `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations`, `ssm:ListCommands` (the last two added in step 2.4) | `*`, to read command results, find the instances a command reached and ask whether the command as a whole succeeded. None of the three supports resource-level permissions |
+| `ssm:PutParameter` (added in step 2.4) | The one parameter `/<name_prefix>/deployed-tag`, which the pipeline writes after a deploy has passed its smoke test |
 | `rds:CreateDBSnapshot` (**prod only**) | The production database and snapshots named `digital-wallet-prod-*` |
 
 Each trust policy checks two claims in the GitHub token: the audience must be `sts.amazonaws.com`, and
@@ -210,6 +212,8 @@ useless to anyone but a job from this repository and environment.
   Provider `default_tags` are not applied to instances launched by an Auto Scaling group, so the
   [compute module](#compute) sets the tag on the group with propagation. Checked on staging: both
   instances carry `environment=staging` and `Role=app`.
+- The parameter `/<name_prefix>/deployed-tag` is created by the compute module and its permissions are built
+  from the same name in the IAM module: change one and the other has to follow.
 - **Not exercised yet:** the `ssm:resourceTag/environment` condition. The tag it needs is in place,
   but the condition is only tested once the pipeline runs `ssm:SendCommand` as the deploy role.
 
@@ -247,7 +251,15 @@ A short `user_data` script runs once per instance and:
    of `scripts/deploy.sh`, which is still a skeleton until the pipeline step;
 5. starts a **placeholder** nginx container on the frontend and backend ports (80 and 8081), so load balancer health checks pass
    before the first real deploy. Its page shows which instance answered, and `/api` returns 200. The
-   image comes from the public ECR mirror of nginx, which avoids Docker Hub's pull rate limits.
+   image comes from the public ECR mirror of nginx, which avoids Docker Hub's pull rate limits;
+6. **converges to the last good release** (step 2.4): reads the SSM parameter `/<name_prefix>/deployed-tag`
+   and, unless it says `none`, runs `deploy.sh` with that tag. The pipeline writes the tag after every deploy
+   that passed its smoke test. Without this step a replacement instance (a failed health check, an instance
+   refresh, a scale-out) would serve the placeholder until the next deploy. If the deploy fails here the
+   placeholder stays up and the boot still finishes. Terraform creates the parameter with the value `none`
+   and ignores later changes to the value, which belongs to the pipeline. It is destroyed with the
+   environment on purpose: a rebuilt environment has empty ECR repositories, so a surviving tag would point
+   at an image that no longer exists.
 
 `deploy.sh` has to remove the placeholder (`docker rm -f placeholder`) before it starts the real
 containers, because both use ports 80 and 8081.
@@ -871,7 +883,7 @@ checks: nothing in it deploys.
 | `secret-scan` | gitleaks on the full history, against `.gitleaks-baseline.json` | a new secret |
 | `image-build-scan` | Builds both images (nothing is pushed) and scans them with trivy, HIGH and CRITICAL that have a fix | any such finding |
 | `iac-checks` | `terraform fmt`, `validate` in `bootstrap`, `staging` and `prod`, tflint and checkov | any of them reports a problem. Runs only when `infra/`, `.tflint.hcl`, `.checkov.yaml` or `ci.yml` changed |
-| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh` and `ecr-tag-status.sh` | a check fails |
+| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh` and `ssm-deploy.sh` | a check fails |
 
 **How it is built.**
 
@@ -950,11 +962,14 @@ the workflow. For example `docker run --rm -i hadolint/hadolint < app/backend/Do
 `trivy fs app --scanners vuln --severity HIGH,CRITICAL`, and `gitleaks git --baseline-path
 .gitleaks-baseline.json`. The Terraform checks are listed under [Quality gates](#quality-gates).
 
-## Continuous delivery: build and push (step 2.3)
+## Continuous delivery: build, push and deploy to staging (steps 2.3 and 2.4)
 
 `.github/workflows/cd.yml` runs when a commit lands on `main`, which is when a pull request is merged
-([ci.yml](#continuous-integration-pull-requests) has already checked it). It has one job so far,
-`build-and-push`. The deploy jobs of steps 2.4 and 2.5 will follow it and use its `tag` output.
+([ci.yml](#continuous-integration-pull-requests) has already checked it). It has two jobs so far:
+`build-and-push` (step 2.3) and `deploy-staging` (step 2.4, [below](#deploy-to-staging-step-24)), which uses the
+`tag` output of the first. The production deploy follows in step 2.5.
+
+### Build and push: `build-and-push`
 
 What the job does, in order:
 
@@ -982,11 +997,13 @@ staging, Variables). None is a secret.
 | `AWS_ROLE_ARN` | The Terraform output `github_deploy_role_arn` of `infra/envs/staging` |
 | `AWS_REGION` | `ap-south-1` |
 | `NAME_PREFIX` | `digital-wallet-staging`, so the repositories are `<prefix>-backend` and `<prefix>-frontend` |
+| `ALB_URL` (step 2.4) | `http://` and the Terraform output `alb_dns_name` of `infra/envs/staging`, for the smoke test. It changes whenever staging is rebuilt, see [after a rebuild](#after-a-rebuild-of-staging) |
 
 ```
 gh variable set AWS_ROLE_ARN --env staging --body "<role arn>"
 gh variable set AWS_REGION   --env staging --body ap-south-1
 gh variable set NAME_PREFIX  --env staging --body digital-wallet-staging
+gh variable set ALB_URL      --env staging --body "http://$(terraform -chdir=infra/envs/staging output -raw alb_dns_name)"
 ```
 
 ### Decisions
@@ -1042,6 +1059,62 @@ gh variable set NAME_PREFIX  --env staging --body digital-wallet-staging
   backend's Debian packages (util-linux, zlib, ncurses, perl and others). None has a fixed version: Debian lists
   them as `affected`, `fix_deferred` or `will_not_fix`. That is exactly what `--ignore-unfixed` leaves out, so the
   gate behaved as designed, and a build fails as soon as one of them gets a fix.
+
+### Deploy to staging (step 2.4)
+
+`deploy-staging` runs after `build-and-push` (`needs`), in the same `staging` GitHub Environment, so it uses
+the same role, and deploys the tag that job output:
+
+1. **Deploys** with `scripts/ssm-deploy.sh staging <tag>`: `aws ssm send-command` with the `AWS-RunShellScript`
+   document, sent to the instances tagged `environment=staging` and `Role=app` (no instance IDs, so a replacement
+   instance is found by its tags), running `/opt/app/deploy.sh <tag>`.
+2. **Smoke-tests** with `scripts/smoke-test.sh "$ALB_URL"`, from the runner, through the public load balancer.
+   It checks that the page is the app and that `/api/health` says ok, so the first-boot placeholder, which
+   also answers 200, does not pass.
+3. **Records the tag** in the SSM parameter `/<name_prefix>/deployed-tag`, only after the smoke test passed.
+
+**How `ssm-deploy.sh` waits and fails** (49 tests in `scripts/tests/ssm-deploy.test.sh`):
+
+- **One instance at a time, and stop at the first error.** `--max-concurrency 1` and `--max-errors 0`. The
+  parameter names come from `aws ssm send-command help`: `MaxErrors` is "the maximum number of errors allowed
+  without the command failing. When the command fails one more time beyond the value of `MaxErrors`, the
+  systems stops sending the command to additional targets", so 0 stops at the first failure (its default, set
+  explicitly so the intent is visible). The second instance keeps serving the old version while the first is
+  updated, and a failed deploy never reaches it.
+- **It waits with `aws ssm wait command-executed`, per instance.** That waiter polls every 5 seconds and gives up
+  after 20 attempts, 100 seconds, which a deploy that pulls images and runs migrations can exceed. When it gives
+  up while the command is still `InProgress` the script calls it again, until 15 minutes. Failed, TimedOut and
+  Cancelled end the run.
+- **On failure it prints the instance's output.** `aws ssm get-command-invocation` supplies the stdout and
+  stderr of `deploy.sh` and the exit code, and the run fails. A successful run prints the same output, so the
+  log shows what each instance did.
+- **A deploy that reaches no instance fails.** Probed on staging with a harmless `echo`: SSM answers
+  `TargetCount: 0` and status `Pending` both for a command whose tags match an instance and for one whose tags
+  match nothing, and it raises no error for the second. A deploy to an environment that is down, or whose
+  instances are not registered with Systems Manager, would therefore look like a success. The script requires
+  an invocation to appear, and the command as a whole to end `Success`, which also catches an instance whose
+  invocation shows up after the others have finished.
+
+**The last good release.** After a deploy that passed its smoke test, the job writes the tag to the SSM
+parameter `/<name_prefix>/deployed-tag`. A new instance reads it at boot and deploys it, so a replacement
+instance serves the last good version and not the placeholder (see [First boot](#first-boot)). The parameter
+only ever holds a tag that was smoke-tested. It is destroyed with the environment, because a rebuilt environment
+has empty ECR repositories. The permissions behind it (list and read the command, write one parameter, read one
+parameter) are in [Identity and access](#identity-and-access-iam).
+
+#### After a rebuild of staging
+
+Staging is destroyed to save money and rebuilt with `terraform apply`. A rebuild changes three things the
+pipeline depends on:
+
+- **The load balancer's address.** Set `ALB_URL` again, or the smoke test checks a load balancer that no longer
+  exists:
+  `gh variable set ALB_URL --env staging --body "http://$(terraform -chdir=infra/envs/staging output -raw alb_dns_name)"`
+- **The ECR repositories come back empty**, and the deployed-tag parameter back as `none`. Run the workflow
+  again for the newest commit on `main` (Actions, the latest CD run, Re-run all jobs): the tags are absent, so
+  both images are rebuilt and pushed, and the deploy follows.
+- **The role, its variables and the environment** keep their names, so `AWS_ROLE_ARN`, `AWS_REGION` and
+  `NAME_PREFIX` stay valid.
 
 ### Not done
 
