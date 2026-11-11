@@ -1,0 +1,158 @@
+name: Rollback
+
+# Deploys a release that is already in ECR to an environment again, normally an older one, WITHOUT building
+# anything: run it by hand from the Actions tab (or `gh workflow run rollback.yml`), pick the environment and
+# give the release's tag. It runs the same deploy action as cd.yml, so a rollback does exactly what a release
+# does: the instances one at a time, the smoke test through the load balancer, and the record of the last good
+# release (README, Rollback, says how to find a tag, and what a rollback does not undo).
+#
+# It is a workflow of its own and not an extra trigger of cd.yml. cd.yml is a chain (build, staging,
+# production), and a run that skips the build would have to skip or rewrite the condition of every job that
+# needs it, which is easy to get wrong and impossible to test short of running it.
+run-name: Rollback ${{ inputs.environment }} to ${{ inputs.image_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Where to roll back
+        type: choice
+        required: true
+        options:
+          - staging
+          - production
+      image_tag:
+        description: The release to deploy, a short commit SHA that is in that environment's ECR (see the README, Rollback)
+        type: string
+        required: true
+
+# Read-only unless a job asks for more.
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: rollback ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The job's environment is the one chosen, so its variables, the role it assumes (the trust policy names
+    # the environment) and its protection rules all follow: production waits for a reviewer's approval, as a
+    # deploy does, and is limited to main.
+    environment: ${{ inputs.environment }}
+    # The same groups as the deploy jobs of cd.yml, so a rollback and a deploy to one environment never overlap.
+    # If a production deploy of cd.yml is waiting for its approval, a production rollback waits behind it:
+    # cancel or reject that run first.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      NAME_PREFIX: ${{ vars.NAME_PREFIX }}
+      ALB_URL: ${{ vars.ALB_URL }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      TARGET: ${{ inputs.environment }}
+    steps:
+      - name: The inputs and the environment are in order
+        run: |
+          status=0
+          # Untrusted text: it reaches this step through the environment, never the command line.
+          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::The release '$IMAGE_TAG' is not a tag: use the short commit SHA, such as 3e8bbd8."
+            status=1
+          fi
+          # Run from another branch, this would run that branch's version of the workflow and scripts. The
+          # environments' deployment-branch rules are what enforce main (production's, and staging's since
+          # step 2.8); this says so early and clearly.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Run the rollback from main (this run is on $GITHUB_REF)."
+            status=1
+          fi
+          for name in AWS_ROLE_ARN AWS_REGION NAME_PREFIX ALB_URL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The variable $name is not set on the GitHub Environment '$TARGET' (Settings, Environments)."
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Refused before any instance is touched: both images of the release have to be in this environment's
+      # repositories. The message lists the releases that are, because the usual causes are a typo and a
+      # release that the lifecycle policy has expired (ECR keeps the last 10 images).
+      - name: The release is in ECR
+        run: scripts/rollback-check.sh "$NAME_PREFIX" "$IMAGE_TAG"
+
+      - uses: ./.github/actions/deploy
+        with:
+          instance-environment: ${{ inputs.environment == 'production' && 'prod' || 'staging' }}
+          image-tag: ${{ env.IMAGE_TAG }}
+          alb-url: ${{ env.ALB_URL }}
+          name-prefix: ${{ env.NAME_PREFIX }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${TARGET^} rolled back to \`${IMAGE_TAG}\`"
+            echo
+            echo "- Deployed to the instances, one at a time, and smoke-tested through \`${ALB_URL}\`"
+            echo "- Recorded in \`/${NAME_PREFIX}/deployed-tag\`, so a replacement instance deploys \`${IMAGE_TAG}\` too"
+            echo "- Nothing was built, and no database migration was undone (README, Rollback)"
+            echo "- The next merge to main deploys the newest release to staging again"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # E-mails a failed rollback, as cd.yml and ci.yml do (README, Pipeline notifications). The notify role trusts a
+  # run on main, which is where a rollback has to be started from.
+  notify:
+    name: notify
+    needs: [rollback]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/notify
+        with:
+          kind: failure
+          role-to-assume: ${{ vars.NOTIFY_ROLE_ARN }}
+          topic-arn: ${{ vars.NOTIFY_TOPIC_ARN }}
+          job-results: |
+            rollback ${{ needs.rollback.result }}
+
+  # Tells the owner that production now runs the release it was rolled back to, as cd.yml does for a deploy.
+  announce-production:
+    name: announce-production
+    needs: [rollback]
+    if: success() && inputs.environment == 'production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/notify
+        with:
+          kind: deployed
+          role-to-assume: ${{ vars.NOTIFY_ROLE_ARN }}
+          topic-arn: ${{ vars.NOTIFY_TOPIC_ARN }}
+          image-tag: ${{ inputs.image_tag }}
+          deployed-to: production
