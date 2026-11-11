@@ -55,6 +55,22 @@ variable "github_repository" {
   }
 }
 
+variable "github_environment" {
+  type        = string
+  description = "Name of the GitHub Environment whose jobs may assume this environment's deploy role, when it is not the same as `environment`. Case-sensitive, and it has to be exactly the name under Settings, Environments. Production sets it: its Terraform environment is prod, its GitHub Environment production."
+  default     = null
+}
+
+variable "image_source_name_prefix" {
+  type        = string
+  description = "name_prefix of the environment whose images this environment promotes instead of building them, for example digital-wallet-staging. Empty (staging): the pipeline builds."
+  default     = ""
+  validation {
+    condition     = can(regex("^[a-z0-9-]*$", var.image_source_name_prefix))
+    error_message = "image_source_name_prefix must be empty or a name prefix such as digital-wallet-staging."
+  }
+}
+
 variable "github_owner_id" {
   type        = string
   description = "Numeric id of the GitHub account that owns the repository. Since 15 July 2026 GitHub puts it, and the repository id, in the token subject that the deploy role trusts. Not secret. Look it up with: gh api repos/OWNER/REPO --jq .owner.id"

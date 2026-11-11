@@ -16,6 +16,13 @@ locals {
   # between those places, as the RDS identifier is for the snapshot permission below.
   deployed_tag_parameter_arn = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${var.name_prefix}/deployed-tag"
 
+  # The repositories of the environment whose images are promoted into this one (the ecr module names
+  # them <name_prefix>-frontend and <name_prefix>-backend).
+  image_source_repository_arns = var.image_source_name_prefix == "" ? [] : [
+    for name in ["frontend", "backend"] :
+    "arn:aws:ecr:${local.region}:${local.account_id}:repository/${var.image_source_name_prefix}-${name}"
+  ]
+
   github_owner   = split("/", var.github_repository)[0]
   github_repo    = split("/", var.github_repository)[1]
   github_subject = "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}:environment:${var.github_environment}"
@@ -202,6 +209,13 @@ data "aws_iam_policy_document" "github_db_snapshot" {
       "arn:aws:rds:${local.region}:${local.account_id}:snapshot:${var.name_prefix}-*",
     ]
   }
+  # "aws rds wait db-snapshot-available" polls DescribeDBSnapshots until the snapshot is ready. The action
+  # lists snapshots, with optional resource types only, so it is granted on "*": read-only metadata.
+  statement {
+    sid       = "WaitForTheSnapshot"
+    actions   = ["rds:DescribeDBSnapshots"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "github_db_snapshot" {
@@ -209,4 +223,27 @@ resource "aws_iam_role_policy" "github_db_snapshot" {
   name   = "db-snapshot"
   role   = aws_iam_role.github_deploy.id
   policy = data.aws_iam_policy_document.github_db_snapshot[0].json
+}
+
+# Production promotes the image that passed staging: its pipeline copies the two images from staging's
+# repositories to its own (scripts/promote-image.sh) instead of building them a second time. Writing to
+# this environment's repositories is already covered above, so this is the read side on the source:
+# the manifest and layers, and DescribeImages to ask whether the tag is there.
+data "aws_iam_policy_document" "github_promote" {
+  count = length(local.image_source_repository_arns) > 0 ? 1 : 0
+  statement {
+    sid = "ReadTheImagesToPromote"
+    actions = [
+      "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability",
+      "ecr:DescribeImages",
+    ]
+    resources = local.image_source_repository_arns
+  }
+}
+
+resource "aws_iam_role_policy" "github_promote" {
+  count  = length(local.image_source_repository_arns) > 0 ? 1 : 0
+  name   = "promote-images"
+  role   = aws_iam_role.github_deploy.id
+  policy = data.aws_iam_policy_document.github_promote[0].json
 }

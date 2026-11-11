@@ -68,16 +68,17 @@ module "secrets" {
 }
 
 module "iam" {
-  source               = "../../modules/iam"
-  name_prefix          = local.name_prefix
-  environment          = var.environment
-  github_repository    = var.github_repository
-  github_owner_id      = var.github_owner_id
-  github_repository_id = var.github_repository_id
-  github_environment   = var.environment # the GitHub Environment must have exactly this name
-  ecr_repository_arns  = values(module.ecr.repository_arns)
-  secret_arns          = [module.rds.master_user_secret_arn, module.secrets.jwt_secret_arn]
-  allow_db_snapshot    = var.allow_db_snapshot
+  source                   = "../../modules/iam"
+  name_prefix              = local.name_prefix
+  environment              = var.environment
+  github_repository        = var.github_repository
+  github_owner_id          = var.github_owner_id
+  github_repository_id     = var.github_repository_id
+  github_environment       = coalesce(var.github_environment, var.environment) # the GitHub Environment must have exactly this name
+  image_source_name_prefix = var.image_source_name_prefix
+  ecr_repository_arns      = values(module.ecr.repository_arns)
+  secret_arns              = [module.rds.master_user_secret_arn, module.secrets.jwt_secret_arn]
+  allow_db_snapshot        = var.allow_db_snapshot
 }
 
 module "alb" {

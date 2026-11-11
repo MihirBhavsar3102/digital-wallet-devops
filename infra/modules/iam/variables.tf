@@ -34,6 +34,15 @@ variable "github_environment" {
   type        = string
   description = "Name of the GitHub Environment whose jobs may assume the deploy role. Case-sensitive."
 }
+variable "image_source_name_prefix" {
+  type        = string
+  description = "name_prefix of the environment whose images this environment's pipeline promotes, for example digital-wallet-staging for production. The deploy role may then read those two repositories. Empty: none."
+  default     = ""
+  validation {
+    condition     = can(regex("^[a-z0-9-]*$", var.image_source_name_prefix))
+    error_message = "image_source_name_prefix must be empty or a name prefix such as digital-wallet-staging."
+  }
+}
 variable "ecr_repository_arns" {
   type        = list(string)
   description = "ARNs of the ECR repositories the instances pull from and the pipeline pushes to."

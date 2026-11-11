@@ -168,12 +168,17 @@ Each environment has its own role, `<name_prefix>-github-deploy`:
 | `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations`, `ssm:ListCommands` (the last two added in step 2.4) | `*`, to read command results, find the instances a command reached and ask whether the command as a whole succeeded. None of the three supports resource-level permissions |
 | `ssm:PutParameter` (added in step 2.4) | The one parameter `/<name_prefix>/deployed-tag`, which the pipeline writes after a deploy has passed its smoke test |
 | `rds:CreateDBSnapshot` (**prod only**) | The production database and snapshots named `digital-wallet-prod-*` |
+| `rds:DescribeDBSnapshots` (**prod only**, added in step 2.5) | `*`. `aws rds wait db-snapshot-available` polls it. It lists snapshot metadata and has only optional resource types, so `*` is the safe scope |
+| ECR read: `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability`, `DescribeImages` (**prod only**, added in step 2.5) | Staging's two repositories only (`image_source_name_prefix`), so production can promote the image that passed staging, see [Production](#production-step-25) |
 
 Each trust policy checks two claims in the GitHub token: the audience must be `sts.amazonaws.com`, and
 the subject must be exactly `repo:MihirBhavsar3102@62109840/digital-wallet-devops@1451854102:environment:<env>`.
 In practice:
 
-- The GitHub Environments must be named exactly `staging` and `prod` (the match is case-sensitive).
+- The GitHub Environments must be named exactly `staging` and `production` (the match is case-sensitive).
+  Production's Terraform environment is `prod`, which names its resources and the `environment=prod` tag the
+  deploy targets, but its GitHub Environment is `production`, so `envs/prod/prod.tfvars` sets
+  `github_environment = "production"` and the trust policy follows it.
 - A workflow job must declare `environment: <env>` and `permissions: id-token: write`.
 - A job from another repository, a fork, or a job with no environment produces a different subject
   and is refused. Production can also require a reviewer's approval on its GitHub Environment.
@@ -510,6 +515,8 @@ them side by side:
 | App instances (min / desired / max) | 1 / 1 / 2 | 2 / 2 / 3 |
 | Log retention | 14 days | 90 days |
 | Deploy role may snapshot the database | no | yes |
+| GitHub Environment the deploy role trusts (`github_environment`) | `staging` (same as the environment) | `production` |
+| Where the images come from (`image_source_name_prefix`) | built by the pipeline | promoted from `digital-wallet-staging` |
 
 `deletion_protection` is a single switch. It protects the database and the load balancer, makes the database
 take a final snapshot, keeps the access log bucket and the images in the ECR repositories when the
