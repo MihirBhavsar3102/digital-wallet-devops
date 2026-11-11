@@ -919,8 +919,11 @@ pull request passes through the same checks as any other.
   major bump, every GitHub Actions update and every Docker image update still got its own pull request: 12 were
   opened within two minutes of the merge, on top of 4 security-update pull requests that were already open
   (challenges log, row 15).
-- **Not yet confirmed.** The file was checked against the published schema, but Dependabot only reads it from
-  `main`, so how it behaves is confirmed by its first run after the merge.
+- **Confirmed after the merge.** Within about three minutes Dependabot opened one grouped pull request (the
+  backend and frontend packages and the frontend Dockerfile together) and closed four superseded ones itself. It
+  left the eight open major-version pull requests alone, so those have to be closed by hand. The first weekly
+  pull request is blocked by CI on a new HIGH finding, `deepmerge-ts` (CVE-2026-40345, fixed only in 8.0.0), that
+  its Prisma 6.0.1 to 6.19.3 update pulls in, which is the gate working as intended (challenges log, row 15).
 
 **Running the same checks locally.** Everything above uses tools you can run yourself; the exact commands are in
 the workflow. For example `docker run --rm -i hadolint/hadolint < app/backend/Dockerfile`,
