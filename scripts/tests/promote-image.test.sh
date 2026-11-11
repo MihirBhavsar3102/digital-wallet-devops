@@ -95,7 +95,7 @@ rc_is()      { [ "$RC" -eq "$1" ]; }
 rc_not()     { [ "$RC" -ne "$1" ]; }
 all_has()    { grep -qF -- "$1" <<< "$ALL"; }
 copied()     { grep -qxF -- "docker buildx imagetools create --prefer-index=false --tag $REG/$1 $REG/$2" "$CALLS"; }
-carbon()     { grep -F -- "imagetools create" "$CALLS" | grep -vqF -- "--prefer-index=false"; [ $? -ne 0 ]; }
+carbon()     { [ "$(grep -F -- "imagetools create" "$CALLS" | grep -vcF -- "--prefer-index=false")" -eq 0 ]; }
 copy_count() { grep -c -F -- "imagetools create" "$CALLS"; }
 
 echo "# a release that passed staging is copied to production"
