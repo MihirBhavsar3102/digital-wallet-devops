@@ -755,7 +755,7 @@ known limit. This is not decided yet.
 | `infra/modules/` | Reusable Terraform modules |
 | `infra/envs/staging/`, `infra/envs/prod/` | One folder per environment, both calling the same modules |
 | `.github/workflows/` | GitHub Actions pipelines (`ci.yml` for pull requests) |
-| `.github/dependabot.yml` | Weekly dependency update pull requests for npm, Docker, GitHub Actions and Terraform |
+| `.github/dependabot.yml` | One weekly pull request with all minor and patch dependency updates (npm, Docker, GitHub Actions, Terraform) |
 | `scripts/` | The deploy script, the smoke test, and the tests for both (`scripts/tests/`) |
 | `monitoring/` | CloudWatch agent configuration |
 | `docs/` | Challenges log and approach documentation |
@@ -904,9 +904,23 @@ are noted here and not suppressed. Findings in the base image with no fix yet ar
 and if one ever cannot be, the ignore file must carry a comment for each entry. Uploading the results to
 GitHub's Security tab (SARIF) is not done.
 
-**Dependabot** (`.github/dependabot.yml`) opens weekly pull requests, grouped by minor and patch, for npm
-(backend and frontend), the two Dockerfiles, GitHub Actions and Terraform. Moving to another Node release line
-is excluded: it is a decision, not an update. Its pull requests pass through the same checks.
+**Dependabot** (`.github/dependabot.yml`) opens **one pull request a week**, on Monday, holding every minor and
+patch update for npm (backend and frontend), the two Dockerfiles, GitHub Actions and Terraform together. It is
+one `multi-ecosystem-groups` group (`weekly`) that all six update entries join with `patterns: ["*"]`. The
+pull request passes through the same checks as any other.
+
+- **Major versions are not in it.** They are excluded with `ignore`. A major bump (a framework, Vite, the Node
+  release line) needs a decision and usually code changes, and inside the weekly pull request it would fail CI
+  and hold the routine updates back with it. Upgrade them by hand when you choose to; `npm outdated` in
+  `app/backend` and `app/frontend` lists them.
+- **Security updates are separate.** GitHub opens those on its own when an advisory appears, so an urgent fix
+  does not wait for Monday or ride along with an update that might fail. They are not controlled by this file.
+- **Why it was changed.** The first version grouped only minor and patch updates inside each npm folder. Every
+  major bump, every GitHub Actions update and every Docker image update still got its own pull request: 12 were
+  opened within two minutes of the merge, on top of 4 security-update pull requests that were already open
+  (challenges log, row 15).
+- **Not yet confirmed.** The file was checked against the published schema, but Dependabot only reads it from
+  `main`, so how it behaves is confirmed by its first run after the merge.
 
 **Running the same checks locally.** Everything above uses tools you can run yourself; the exact commands are in
 the workflow. For example `docker run --rm -i hadolint/hadolint < app/backend/Dockerfile`,

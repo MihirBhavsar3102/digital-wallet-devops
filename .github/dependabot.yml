@@ -1,72 +1,72 @@
-# Dependency updates arrive as pull requests, so they pass through the same CI as any other change.
-# Weekly, on Monday, and grouped so a week does not produce a pile of single-package pull requests.
+# One pull request a week for all dependency updates, across every ecosystem below. Before this,
+# each package and each major version got its own pull request.
+#
+# - The pull request opens on Monday and holds every minor and patch update (npm, the Dockerfiles,
+#   GitHub Actions and Terraform) together. It goes through the same CI as any other change.
+# - Major versions are left out on purpose. A major bump (a framework, Vite, the Node release line)
+#   needs a decision and usually code changes, and inside the weekly pull request it would fail CI
+#   and hold the routine updates back with it. Upgrade them by hand when you choose to.
+# - Security updates are not part of this: GitHub opens those separately, when an advisory appears,
+#   so an urgent fix does not wait for Monday or ride along with an update that might fail.
+#
+# package.json "overrides" in app/backend pins four transitive packages that NestJS pins to
+# vulnerable versions. Dependabot does not touch overrides: revisit them when NestJS is updated.
 version: 2
+
+multi-ecosystem-groups:
+  weekly:
+    schedule:
+      interval: weekly
+      day: monday
 
 updates:
   - package-ecosystem: npm
     directory: /app/backend
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    groups:
-      backend-minor-and-patch:
-        update-types: [minor, patch]
-    commit-message:
-      prefix: "deps(backend)"
-    # package.json "overrides" pins four transitive packages that NestJS pins to vulnerable
-    # versions. Dependabot does not touch overrides: revisit them when NestJS is updated.
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /app/frontend
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    groups:
-      frontend-minor-and-patch:
-        update-types: [minor, patch]
-    commit-message:
-      prefix: "deps(frontend)"
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /app/backend
-    schedule:
-      interval: weekly
-      day: monday
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
     ignore:
-      # Moving to another Node release line is a decision, not an update. Node 22 is the LTS line in use.
-      - dependency-name: node
+      - dependency-name: "*"
         update-types: ["version-update:semver-major"]
-    commit-message:
-      prefix: "deps(backend-image)"
 
   - package-ecosystem: docker
     directory: /app/frontend
-    schedule:
-      interval: weekly
-      day: monday
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
     ignore:
-      - dependency-name: node
+      - dependency-name: "*"
         update-types: ["version-update:semver-major"]
-    commit-message:
-      prefix: "deps(frontend-image)"
 
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    commit-message:
-      prefix: "deps(actions)"
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: terraform
     directories:
       - /infra/bootstrap
       - /infra/envs/*
       - /infra/modules/*
-    schedule:
-      interval: weekly
-      day: monday
-    commit-message:
-      prefix: "deps(terraform)"
+    multi-ecosystem-group: weekly
+    patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
