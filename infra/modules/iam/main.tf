@@ -209,12 +209,15 @@ data "aws_iam_policy_document" "github_db_snapshot" {
       "arn:aws:rds:${local.region}:${local.account_id}:snapshot:${var.name_prefix}-*",
     ]
   }
-  # "aws rds wait db-snapshot-available" polls DescribeDBSnapshots until the snapshot is ready. The action
-  # lists snapshots, with optional resource types only, so it is granted on "*": read-only metadata.
+  # "aws rds wait db-snapshot-available" polls DescribeDBSnapshots until the snapshot is ready. The wait
+  # names the snapshot, which RDS checks against the snapshot's ARN, so the same two ARNs as above are enough.
   statement {
-    sid       = "WaitForTheSnapshot"
-    actions   = ["rds:DescribeDBSnapshots"]
-    resources = ["*"]
+    sid     = "WaitForTheSnapshot"
+    actions = ["rds:DescribeDBSnapshots"]
+    resources = [
+      "arn:aws:rds:${local.region}:${local.account_id}:db:${var.name_prefix}-db",
+      "arn:aws:rds:${local.region}:${local.account_id}:snapshot:${var.name_prefix}-*",
+    ]
   }
 }
 

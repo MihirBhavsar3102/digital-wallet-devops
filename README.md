@@ -168,7 +168,7 @@ Each environment has its own role, `<name_prefix>-github-deploy`:
 | `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations`, `ssm:ListCommands` (the last two added in step 2.4) | `*`, to read command results, find the instances a command reached and ask whether the command as a whole succeeded. None of the three supports resource-level permissions |
 | `ssm:PutParameter` (added in step 2.4) | The one parameter `/<name_prefix>/deployed-tag`, which the pipeline writes after a deploy has passed its smoke test |
 | `rds:CreateDBSnapshot` (**prod only**) | The production database and snapshots named `digital-wallet-prod-*` |
-| `rds:DescribeDBSnapshots` (**prod only**, added in step 2.5) | `*`. `aws rds wait db-snapshot-available` polls it. It lists snapshot metadata and has only optional resource types, so `*` is the safe scope |
+| `rds:DescribeDBSnapshots` (**prod only**, added in step 2.5) | The same two resources: the database and snapshots named `digital-wallet-prod-*`. `aws rds wait db-snapshot-available` polls it, and names the snapshot, which is what RDS checks |
 | ECR read: `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability`, `DescribeImages` (**prod only**, added in step 2.5) | Staging's two repositories only (`image_source_name_prefix`), so production can promote the image that passed staging, see [Production](#production-step-25) |
 
 Each trust policy checks two claims in the GitHub token: the audience must be `sts.amazonaws.com`, and
