@@ -5,7 +5,9 @@ name: CD
 #   build-and-push   builds both images, scans them and pushes them to ECR tagged with the short commit SHA
 #   deploy-staging   deploys that tag to the staging instances through SSM, smoke-tests it through the load
 #                    balancer, and records the tag as the last good release
-# The production deploy, behind a manual approval, follows in step 2.5.
+#   deploy-production  waits for a person to approve it (the production GitHub Environment), promotes the
+#                    image that passed staging into production's ECR, snapshots the database, deploys,
+#                    smoke-tests and records the tag
 on:
   push:
     branches: [main]
@@ -14,13 +16,12 @@ on:
 permissions:
   contents: read
 
-# One run at a time, in order, and a run that has started is never cancelled: stopping a push or a
-# deploy half way is worse than waiting. If several commits land while a run is going, GitHub keeps
-# only the newest waiting run, which is fine: every run ships the latest main, and the commits that
-# were skipped are in it.
-concurrency:
-  group: cd
-  cancel-in-progress: false
+# Concurrency is set per deploy job, not for the workflow (the groups are on the jobs below). A group on
+# the whole workflow would hold every later run behind a run that is waiting for someone to approve the
+# production deploy, and that wait can last days. Per job, two deploys to one environment can never
+# overlap, a deploy that has started is never cancelled (stopping one half way is worse than waiting),
+# and when several runs queue for the same environment GitHub keeps only the newest waiting one, which
+# is right because every run ships the latest main. Builds need no group: each pushes its own tag.
 
 env:
   # The same image, pinned by digest, as in ci.yml: update both together (a comment there says how).
@@ -212,6 +213,9 @@ jobs:
     timeout-minutes: 30
     # Same environment, and so the same role and variables, as build-and-push.
     environment: staging
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
@@ -274,4 +278,109 @@ jobs:
             echo "- Deployed to the instances tagged \`environment=staging\`, one at a time"
             echo "- Smoke test passed through \`${ALB_URL}\`"
             echo "- Recorded in \`/${NAME_PREFIX}/deployed-tag\`, which new instances deploy at boot"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-production:
+    name: deploy-production
+    # build-and-push is listed as well as deploy-staging, because a job can only read the outputs of the
+    # jobs it names, and the tag is build-and-push's output.
+    needs: [build-and-push, deploy-staging]
+    runs-on: ubuntu-latest
+    # Starts counting after the approval. The snapshot can take a while, then the deploy and its waits.
+    timeout-minutes: 90
+    # The approval gate. Under Settings, Environments, production, "Required reviewers" makes this job wait,
+    # before any of its steps run, until a reviewer approves it, and "Deployment branches" limits it to
+    # main. The deploy role trusts only tokens from a job in this environment, so the role cannot be
+    # used without passing the gate. The variables below belong to this GitHub Environment.
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }} # digital-wallet-prod-github-deploy
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      NAME_PREFIX: ${{ vars.NAME_PREFIX }} # digital-wallet-prod
+      SOURCE_NAME_PREFIX: ${{ vars.SOURCE_NAME_PREFIX }} # digital-wallet-staging: where the image that passed staging is
+      ALB_URL: ${{ vars.ALB_URL }} # http://<production load balancer DNS name>, from Terraform's alb_dns_name
+      IMAGE_TAG: ${{ needs.build-and-push.outputs.tag }}
+    steps:
+      - name: The production environment is configured
+        run: |
+          status=0
+          for name in AWS_ROLE_ARN AWS_REGION NAME_PREFIX SOURCE_NAME_PREFIX ALB_URL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The variable $name is not set on the GitHub Environment 'production' (Settings, Environments). Production has to be applied first: see the README."
+              status=1
+            fi
+          done
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "::error::build-and-push did not output an image tag."
+            status=1
+          fi
+          exit "$status"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      # Production runs the image that passed staging, not a second build of the commit. The two
+      # environments have separate repositories, so the two images are copied across, inside ECR, with the
+      # same digest. A release that is not in staging's repositories is refused before anything is copied.
+      - name: Promote the release that passed staging into production's repositories
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: scripts/promote-image.sh "$SOURCE_NAME_PREFIX" "$NAME_PREFIX" "$IMAGE_TAG"
+
+      # A restore point from just before the deploy (the backup strategy, step 4.3). The name has to start
+      # with the name prefix, which is what the role's permission matches, and is unique per run attempt.
+      # Migrations run as part of a deploy and cannot be undone by a rollback of the code, so the deploy
+      # does not start until the snapshot is available.
+      - name: Snapshot the production database
+        id: snapshot
+        run: |
+          snapshot="${NAME_PREFIX}-pre-${IMAGE_TAG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "Creating the snapshot ${snapshot}"
+          aws rds create-db-snapshot --db-instance-identifier "${NAME_PREFIX}-db" \
+            --db-snapshot-identifier "$snapshot" > /dev/null
+          aws rds wait db-snapshot-available --db-snapshot-identifier "$snapshot"
+          echo "The snapshot ${snapshot} is available"
+          echo "snapshot=${snapshot}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to the production instances
+        run: scripts/ssm-deploy.sh prod "$IMAGE_TAG"
+
+      - name: Smoke test through the load balancer
+        run: scripts/smoke-test.sh "$ALB_URL"
+
+      # The deployed tag, recorded where the next deploy, a rollback and a replacement instance find it.
+      - name: Record the tag as the last good release
+        run: |
+          aws ssm put-parameter --name "/${NAME_PREFIX}/deployed-tag" --value "$IMAGE_TAG" \
+            --type String --overwrite > /dev/null
+          echo "/${NAME_PREFIX}/deployed-tag is now ${IMAGE_TAG}"
+
+      - name: Summary
+        env:
+          SNAPSHOT: ${{ steps.snapshot.outputs.snapshot }}
+        run: |
+          {
+            echo "### Production runs \`${IMAGE_TAG}\`"
+            echo
+            echo "- Promoted from \`${SOURCE_NAME_PREFIX}\`: the same image that passed staging"
+            echo "- Database snapshot taken first: \`${SNAPSHOT}\`"
+            echo "- Deployed to the instances tagged \`environment=prod\`, one at a time"
+            echo "- Smoke test passed through \`${ALB_URL}\`"
+            echo "- Recorded in \`/${NAME_PREFIX}/deployed-tag\`"
           } >> "$GITHUB_STEP_SUMMARY"

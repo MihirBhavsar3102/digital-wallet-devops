@@ -31,3 +31,7 @@ db_backup_retention_period = 7
 deletion_protection = true # also: a final snapshot is taken, the access log bucket and ECR images are kept
 allow_db_snapshot   = true
 log_retention_days  = 90
+
+# deploy pipeline
+github_environment       = "production"             # the GitHub Environment's name (the approval gate); the Terraform environment is prod
+image_source_name_prefix = "digital-wallet-staging" # production promotes the image that passed staging and does not build its own
