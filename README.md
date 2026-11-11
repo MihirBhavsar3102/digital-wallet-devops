@@ -23,7 +23,8 @@ somewhere to store state to create that bucket. `infra/bootstrap/` breaks the lo
 **local** state and is applied by hand, once. Its `terraform.tfstate` is git-ignored. Bootstrap also
 creates the account-wide GitHub OIDC identity provider (see
 [Identity and access](#identity-and-access-iam)), because that provider is one per account and
-must outlive any single environment.
+must outlive any single environment, and the [pipeline notifications](#pipeline-notifications-step-26)
+(an SNS topic with an e-mail subscription, and the role that publishes to it) for the same reason.
 
 ### Limitations
 
@@ -911,7 +912,7 @@ checks: nothing in it deploys.
 | `secret-scan` | gitleaks on the full history, against `.gitleaks-baseline.json` | a new secret |
 | `image-build-scan` | Builds both images (nothing is pushed) and scans them with trivy, HIGH and CRITICAL that have a fix | any such finding |
 | `iac-checks` | `terraform fmt`, `validate` in `bootstrap`, `staging` and `prod`, tflint and checkov | any of them reports a problem. Runs only when `infra/`, `.tflint.hcl`, `.checkov.yaml` or `ci.yml` changed |
-| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh` and `promote-image.sh` | a check fails |
+| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh` and `notify.sh` | a check fails |
 
 **How it is built.**
 
@@ -1268,6 +1269,95 @@ or `terraform destroy` stops with an error, and delete the pre-deploy snapshots 
   done. They are listed here for the future-improvements list of the final write-up. ECR's own scan on push
   still runs on every pushed image.
 - **Scan results are not uploaded as SARIF** to GitHub's Security tab, the same as in `ci.yml`.
+
+## Pipeline notifications (step 2.6)
+
+A failed pipeline sends an e-mail, through an SNS topic with an e-mail subscription. There is no Slack: the plan
+offered either, and e-mail was chosen.
+
+| E-mail | Sent when | Subject looks like |
+|--------|-----------|--------------------|
+| A failed CI run | a job of `ci.yml` failed on a pull request | `[digital-wallet-devops] CI failed: unit-tests, integration-tests (PR #59)` |
+| A failed CD run | `build-and-push`, `deploy-staging` or `deploy-production` failed, or the production approval was rejected | `[digital-wallet-devops] CD failed: deploy-staging (main)` |
+| A production deploy | `deploy-production` succeeded (the "Should" of the plan) | `[digital-wallet-devops] production now runs 3e8bbd8` |
+
+The body names the failed jobs, lists the result of every job, and gives the branch or pull request, who
+triggered the run, the commit (with a link) and the run's URL.
+
+### How it works
+
+- **A final `notify` job in `ci.yml` and in `cd.yml`.** It lists every other job in `needs` and runs with
+  `if: failure()`, so it starts when they have all finished and fires when any of them failed. `failure()` is false
+  for a cancelled run, so a push that supersedes a run does not send an e-mail for the run it cancelled.
+- **Where it does not run.** A pull request from a fork and a pull request that Dependabot opened get no OIDC
+  token to give to AWS, so `ci.yml`'s notify job is left out for them (they still show red in GitHub). The job
+  is not a required check.
+- **One composite action, `.github/actions/notify`.** It assumes the notify role through OIDC (no stored key) and
+  runs `scripts/notify.sh`, which builds the message and publishes it (40 tests in
+  `scripts/tests/notify.test.sh`). If the two repository variables below are not set, it prints a warning on the
+  run and sends nothing, so a failing run does not fail a second time.
+- **Branch names are untrusted.** Branch names, pull request branches and actor names are chosen by whoever
+  opens the pull request. They reach the script through the environment, never the command line, and the script
+  removes line breaks and control characters (so a branch named `main` + newline + `Run: <their link>` cannot forge a
+  line) and makes the subject printable ASCII cut to the 100 characters SNS accepts. Tested.
+- **A notification that cannot be sent fails the notify job**, so a broken channel is seen.
+
+### Set up once
+
+1. Put your address in `infra/bootstrap/terraform.tfvars`, which git ignores (the variable is sensitive and has no
+   default, so it never enters the repository): `alert_email = "you@example.com"`.
+2. Apply bootstrap (4 resources to add: the topic, the subscription, the role and its policy):
+   ```
+   cd infra/bootstrap
+   terraform plan
+   terraform apply
+   ```
+3. **Confirm the subscription.** AWS sends "AWS Notification - Subscription Confirmation" to the address; follow
+   the link in it. Until then the subscription is `PendingConfirmation` and **nothing is delivered**, with no error
+   anywhere. Check with
+   `aws sns list-subscriptions-by-topic --topic-arn <arn> --query 'Subscriptions[].SubscriptionArn'`: a pending one
+   shows `PendingConfirmation` instead of an ARN.
+4. Set the two repository variables (not secrets, and not environment-scoped, because a notify job has no
+   environment):
+   ```
+   gh variable set NOTIFY_ROLE_ARN  --body "$(terraform -chdir=infra/bootstrap output -raw github_notify_role_arn)"
+   gh variable set NOTIFY_TOPIC_ARN --body "$(terraform -chdir=infra/bootstrap output -raw pipeline_alerts_topic_arn)"
+   ```
+
+### Decisions
+
+- **The topic is in bootstrap, not in an environment, and is not the alarm topic.** The plan said to publish to
+  "the SNS topic you already create for alarms". There is none yet (monitoring is Part 3), and one per
+  environment would be destroyed with staging every day. A recreated e-mail subscription has to be confirmed again
+  by clicking a link, so notifications would stop after every rebuild, and a failed pull request has to be reported
+  when no environment is up at all. Bootstrap is applied once and outlives every environment, like the OIDC provider.
+- **The topic uses the AWS-managed key (`alias/aws/sns`).** It is free, and checkov wants topics encrypted. The key's
+  policy, read in this account, allows any principal in the account that may use SNS to publish through SNS, so the
+  publisher role needs `sns:Publish` and nothing for KMS. **This key cannot be used for CloudWatch alarms**:
+  CloudWatch cannot be granted use of an AWS-managed key, so the alarm topic of the monitoring step needs a
+  customer-managed key, or none.
+- **The role trusts two token subjects**, in the immutable form (see
+  [GitHub Actions deploy roles](#github-actions-deploy-roles-oidc)): a run on `main`
+  (`...:ref:refs/heads/main`, which is `cd.yml`) and a pull request of this repository (`...:pull_request`, which is
+  `ci.yml`). It belongs to no environment because a notify job has none. All it can do is `sns:Publish` to the one
+  topic, so a pull request that rewrote the workflow could do no more than send e-mail to the owner.
+- **Rejecting a production deployment sends an e-mail, cancelling the run does not.** A rejected deployment is a
+  failed job, so `failure()` is true. To dismiss a run that waits for an approval without an e-mail, cancel the run.
+
+### Test it
+
+The plan's test is a pull request with a deliberately failing test. Branch from `main`, add a test that fails
+(for example `expect(1).toBe(2)` in a new file under `app/backend/src`), open a **draft** pull request, wait for
+`unit-tests` to fail, and check for the e-mail, which arrives within a minute or so of the `notify` job. Then close
+the pull request without merging and delete the branch. To test `cd.yml`'s notice, reject the production
+deployment of a run that waits for approval.
+
+### Not done
+
+- **Slack.** Not wanted.
+- **Rate limiting or a digest.** Every failed run sends one e-mail.
+- **E-mail for a failed run of a fork's or Dependabot's pull request**, for the reason above.
+- **A second subscriber.** Add another `aws_sns_topic_subscription`, or subscribe by hand in the console.
 
 ## Credits
 

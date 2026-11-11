@@ -7,3 +7,13 @@ output "github_oidc_provider_arn" {
   description = "ARN of the account-wide GitHub Actions OIDC identity provider; the per-environment deploy roles trust it."
   value       = aws_iam_openid_connect_provider.github.arn
 }
+
+output "pipeline_alerts_topic_arn" {
+  description = "ARN of the SNS topic that e-mails pipeline failures; the repository variable NOTIFY_TOPIC_ARN."
+  value       = aws_sns_topic.pipeline_alerts.arn
+}
+
+output "github_notify_role_arn" {
+  description = "ARN of the role the notify jobs assume to publish to that topic; the repository variable NOTIFY_ROLE_ARN."
+  value       = aws_iam_role.github_notify.arn
+}
