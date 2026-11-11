@@ -328,3 +328,46 @@ jobs:
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/promote-image.test.sh
       - name: notify.sh
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/notify.test.sh
+
+  # E-mails a failed run (SNS, see "Pipeline notifications" in the README). It lists every other job, so it
+  # only starts when they have all finished, and failure() is true when any of them failed. It is false for a
+  # cancelled run, so a push that supersedes the run does not send an e-mail for the one it cancelled.
+  # It is left out where the run gets no OIDC token to give to AWS: a pull request from a fork, and one
+  # that Dependabot opened (Dependabot's runs have a read-only token). It is not a required check.
+  notify:
+    name: notify
+    needs:
+      - changes
+      - lint
+      - unit-tests
+      - integration-tests
+      - dependency-scan
+      - secret-scan
+      - image-build-scan
+      - iac-checks
+      - script-tests
+    if: failure() && github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.fork != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write # the role is assumed through OIDC, no stored key
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/notify
+        with:
+          kind: failure
+          role-to-assume: ${{ vars.NOTIFY_ROLE_ARN }}
+          topic-arn: ${{ vars.NOTIFY_TOPIC_ARN }}
+          job-results: |
+            changes ${{ needs.changes.result }}
+            lint ${{ needs.lint.result }}
+            unit-tests ${{ needs.unit-tests.result }}
+            integration-tests ${{ needs.integration-tests.result }}
+            dependency-scan ${{ needs.dependency-scan.result }}
+            secret-scan ${{ needs.secret-scan.result }}
+            image-build-scan ${{ needs.image-build-scan.result }}
+            iac-checks ${{ needs.iac-checks.result }}
+            script-tests ${{ needs.script-tests.result }}

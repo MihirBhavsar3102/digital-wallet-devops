@@ -1,0 +1,83 @@
+name: Notify
+description: >-
+  E-mails a pipeline failure, or a production deploy, by publishing to the SNS topic that infra/bootstrap
+  subscribes an address to. The caller has to check the repository out first (this runs scripts/notify.sh)
+  and needs "permissions: id-token: write". Used by the notify jobs of ci.yml and cd.yml.
+
+inputs:
+  kind:
+    description: "failure, or deployed"
+    required: true
+  role-to-assume:
+    description: >-
+      The role to publish with (the repository variable NOTIFY_ROLE_ARN, the output github_notify_role_arn of
+      infra/bootstrap). Empty: nothing is sent, and a warning says so.
+    required: false
+    default: ""
+  topic-arn:
+    description: >-
+      The SNS topic (the repository variable NOTIFY_TOPIC_ARN, the output pipeline_alerts_topic_arn of
+      infra/bootstrap). Empty: nothing is sent, and a warning says so.
+    required: false
+    default: ""
+  job-results:
+    description: "For failure: one '<job> <result>' per line, from the needs of the calling job."
+    required: false
+    default: ""
+  image-tag:
+    description: "For deployed: the release's tag."
+    required: false
+    default: ""
+  deployed-to:
+    description: "For deployed: the environment, for example production."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # A channel that is not set up must not make a failing run fail a second time, but it must not be
+    # silent either: the warning shows on the run's page.
+    - name: Is the notification channel set up?
+      id: check
+      shell: bash
+      env:
+        ROLE_TO_ASSUME: ${{ inputs.role-to-assume }}
+        TOPIC_ARN: ${{ inputs.topic-arn }}
+      run: |
+        if [ -z "$ROLE_TO_ASSUME" ] || [ -z "$TOPIC_ARN" ]; then
+          echo "::warning title=No e-mail was sent::The repository variables NOTIFY_ROLE_ARN and NOTIFY_TOPIC_ARN are not both set, so the notification channel is not set up (README, Pipeline notifications)."
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "configured=true" >> "$GITHUB_OUTPUT"
+        # The topic's region is in its ARN: arn:aws:sns:<region>:<account>:<name>
+        echo "region=$(cut -d: -f4 <<< "$TOPIC_ARN")" >> "$GITHUB_OUTPUT"
+
+    - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      if: steps.check.outputs.configured == 'true'
+      with:
+        role-to-assume: ${{ inputs.role-to-assume }}
+        aws-region: ${{ steps.check.outputs.region }}
+
+    # Everything that came from outside (branch names, the actor) goes in through the environment and is
+    # cleaned by the script, and is never put into the command line.
+    - name: Send the e-mail
+      if: steps.check.outputs.configured == 'true'
+      shell: bash
+      env:
+        KIND: ${{ inputs.kind }}
+        TOPIC_ARN: ${{ inputs.topic-arn }}
+        WORKFLOW: ${{ github.workflow }}
+        REPOSITORY: ${{ github.repository }}
+        REF_NAME: ${{ github.head_ref || github.ref_name }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        ACTOR: ${{ github.actor }}
+        # For a pull request github.sha is a temporary merge commit that has no page: link the branch's own.
+        SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        JOB_RESULTS: ${{ inputs.job-results }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        DEPLOYED_TO: ${{ inputs.deployed-to }}
+      run: '"$GITHUB_WORKSPACE/scripts/notify.sh" "$KIND"'

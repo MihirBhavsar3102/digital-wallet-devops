@@ -384,3 +384,55 @@ jobs:
             echo "- Smoke test passed through \`${ALB_URL}\`"
             echo "- Recorded in \`/${NAME_PREFIX}/deployed-tag\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # E-mails a failed run (SNS, see "Pipeline notifications" in the README). It lists every other job, so it
+  # only starts when they have all finished or been skipped, and failure() is true when any of them failed.
+  # It is false for a cancelled run: cancelling a run that waits for the production approval is the way to
+  # dismiss it without an e-mail, while rejecting the deployment counts as a failure and sends one.
+  notify:
+    name: notify
+    needs: [build-and-push, deploy-staging, deploy-production]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # No environment: the notify role trusts a run on main and a pull request, not a GitHub Environment.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/notify
+        with:
+          kind: failure
+          role-to-assume: ${{ vars.NOTIFY_ROLE_ARN }}
+          topic-arn: ${{ vars.NOTIFY_TOPIC_ARN }}
+          job-results: |
+            build-and-push ${{ needs.build-and-push.result }}
+            deploy-staging ${{ needs.deploy-staging.result }}
+            deploy-production ${{ needs.deploy-production.result }}
+
+  # Tells the owner that a release is live in production. It starts only when deploy-production succeeded,
+  # so it also stays quiet while the deployment waits for an approval, and when it is rejected or cancelled.
+  announce-production:
+    name: announce-production
+    # build-and-push is listed because the tag is its output.
+    needs: [build-and-push, deploy-production]
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/notify
+        with:
+          kind: deployed
+          role-to-assume: ${{ vars.NOTIFY_ROLE_ARN }}
+          topic-arn: ${{ vars.NOTIFY_TOPIC_ARN }}
+          image-tag: ${{ needs.build-and-push.outputs.tag }}
+          deployed-to: production
