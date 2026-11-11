@@ -1,0 +1,72 @@
+# Dependency updates arrive as pull requests, so they pass through the same CI as any other change.
+# Weekly, on Monday, and grouped so a week does not produce a pile of single-package pull requests.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /app/backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      backend-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps(backend)"
+    # package.json "overrides" pins four transitive packages that NestJS pins to vulnerable
+    # versions. Dependabot does not touch overrides: revisit them when NestJS is updated.
+
+  - package-ecosystem: npm
+    directory: /app/frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      frontend-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps(frontend)"
+
+  - package-ecosystem: docker
+    directory: /app/backend
+    schedule:
+      interval: weekly
+      day: monday
+    ignore:
+      # Moving to another Node release line is a decision, not an update. Node 22 is the LTS line in use.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: "deps(backend-image)"
+
+  - package-ecosystem: docker
+    directory: /app/frontend
+    schedule:
+      interval: weekly
+      day: monday
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: "deps(frontend-image)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "deps(actions)"
+
+  - package-ecosystem: terraform
+    directories:
+      - /infra/bootstrap
+      - /infra/envs/*
+      - /infra/modules/*
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "deps(terraform)"

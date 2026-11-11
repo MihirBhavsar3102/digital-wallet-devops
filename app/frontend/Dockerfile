@@ -15,6 +15,10 @@ RUN npm run build
 
 # ---- serve: nginx with our own config
 FROM nginx:1.30.6-alpine
+# The pinned base still carries libxslt 1.1.43-r3, which has two HIGH CVEs fixed in -r4, and the image
+# scan in CI fails on fixable HIGH findings. Upgrade only that package. Remove this line once the
+# base image ships the fixed version (the next nginx tag).
+RUN apk upgrade --no-cache libxslt
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
