@@ -1028,6 +1028,21 @@ gh variable set NAME_PREFIX  --env staging --body digital-wallet-staging
 | One tag exists | Builds, scans and pushes only the other |
 | The check itself fails | Stops with AWS's message |
 
+### Checked on `main` (2026-11-11)
+
+- **First run.** After the trust policy fix (see the immutable subject note under
+  [GitHub Actions deploy roles](#github-actions-deploy-roles-oidc)), the run logged in to AWS, built both images,
+  scanned them and pushed them in 4 minutes 12 seconds. Both repositories hold the tag `6d97901`, the first seven
+  characters of the merge commit. The build cache starts cold on the first run.
+- **Re-run of the same commit.** It finished in 18 seconds: both tags were `present`, so nothing was built, scanned
+  or pushed, and the run still succeeded. That is the immutable-tag decision working on real AWS.
+- **ECR's own scan reports more than the gate does.** Scan on push shows 6 HIGH, 2 MEDIUM and 3 LOW on the backend
+  and 1 CRITICAL on the frontend. Trivy run on the pushed images, without `--ignore-unfixed`, finds no HIGH or
+  CRITICAL in the frontend (so ECR's zlib finding is not confirmed), and 11 distinct HIGH and CRITICAL CVEs in the
+  backend's Debian packages (util-linux, zlib, ncurses, perl and others). None has a fixed version: Debian lists
+  them as `affected`, `fix_deferred` or `will_not_fix`. That is exactly what `--ignore-unfixed` leaves out, so the
+  gate behaved as designed, and a build fails as soon as one of them gets a fix.
+
 ### Not done
 
 - **Production's registry.** The two environments have separate repositories, and this job pushes to
