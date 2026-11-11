@@ -1,0 +1,203 @@
+name: CD
+
+# Runs when a commit lands on main, which is when a pull request is merged. ci.yml has already checked
+# the change, so this workflow ships it. Step 2.3 is the first job: build both images, scan them and
+# push them to ECR tagged with the short commit SHA. Deploying that tag is added in steps 2.4 and 2.5.
+on:
+  push:
+    branches: [main]
+
+# Read-only unless a job asks for more (build-and-push adds id-token: write for the AWS login).
+permissions:
+  contents: read
+
+# One run at a time, in order, and a run that has started is never cancelled: stopping a push or a
+# deploy half way is worse than waiting. If several commits land while a run is going, GitHub keeps
+# only the newest waiting run, which is fine: every run ships the latest main, and the commits that
+# were skipped are in it.
+concurrency:
+  group: cd
+  cancel-in-progress: false
+
+env:
+  # The same image, pinned by digest, as in ci.yml: update both together (a comment there says how).
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+
+jobs:
+  build-and-push:
+    name: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The deploy role's trust policy accepts one token subject, repo:<owner>/<repo>:environment:staging,
+    # and the subject only says "environment:staging" if the job declares the environment. Without this
+    # line the login to AWS is refused. The values below belong to that GitHub Environment (Settings,
+    # Environments, staging, Variables). None of them is a secret: access comes from the role, not a key.
+    environment: staging
+    permissions:
+      id-token: write # lets the job ask GitHub for the token that AWS exchanges for temporary credentials
+      contents: read
+    outputs:
+      # The tag of both images, for the deploy jobs (steps 2.4 and 2.5).
+      tag: ${{ steps.meta.outputs.tag }}
+    env:
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }} # <name_prefix>-github-deploy, see the Terraform output github_deploy_role_arn
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      NAME_PREFIX: ${{ vars.NAME_PREFIX }} # the repositories are <name_prefix>-backend and <name_prefix>-frontend
+    steps:
+      - name: The staging environment is configured
+        run: |
+          status=0
+          for name in AWS_ROLE_ARN AWS_REGION NAME_PREFIX; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The variable $name is not set on the GitHub Environment 'staging' (Settings, Environments)."
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Seven characters of the commit, always: "git rev-parse --short" can return more when a shorter
+      # one would be ambiguous, and the tag has to be predictable.
+      - name: Image tag (the short commit SHA)
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # No stored keys: the action trades the run's OIDC token for temporary credentials of the role.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      # Tags are immutable, so pushing a tag that exists is rejected. A re-run of a commit whose images
+      # were pushed (the run failed later, or someone re-ran it) must therefore not push again. Decision:
+      # skip an image whose tag is already in ECR, and rebuild only the ones that are not. Checking each
+      # image on its own also repairs a run that pushed the backend and stopped before the frontend.
+      # The first run of a commit finds nothing and builds both. A failure of the check itself stops
+      # the job (scripts/ecr-tag-status.sh), so that "cannot tell" is never treated as "absent".
+      - name: Which images still need to be pushed
+        id: plan
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          missing=""
+          for image in backend frontend; do
+            state=$(scripts/ecr-tag-status.sh "${NAME_PREFIX}-${image}" "$TAG")
+            echo "${NAME_PREFIX}-${image}:${TAG} is ${state} in ECR"
+            if [ "$state" = "absent" ]; then
+              missing="${missing} ${image}"
+            fi
+          done
+          echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
+
+      - name: Nothing to build
+        if: steps.plan.outputs.missing == ''
+        run: echo "Both images for ${{ steps.meta.outputs.tag }} are already in ECR. Nothing is built or pushed."
+
+      - name: Set up Buildx
+        if: steps.plan.outputs.missing != ''
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Both builds only load the image into the local Docker, so that it can be scanned before anything
+      # is pushed. The layer cache is GitHub's cache service, one scope per image: an unchanged
+      # dependency layer (npm ci) is restored and not rebuilt. ignore-error: a cache outage slows the
+      # build down but must not fail a release. "pull" fetches the newest base image, as ci.yml does.
+      - name: Build the backend image
+        if: contains(steps.plan.outputs.missing, 'backend')
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app/backend
+          load: true
+          push: false
+          pull: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.NAME_PREFIX }}-backend:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max,ignore-error=true
+
+      # Vite bakes the API address into the bundle when it builds, so it is a build argument. A relative
+      # /api works behind any load balancer hostname, which is what lets one image serve every environment.
+      - name: Build the frontend image
+        if: contains(steps.plan.outputs.missing, 'frontend')
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app/frontend
+          load: true
+          push: false
+          pull: true
+          build-args: VITE_API_BASE_URL=/api
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.NAME_PREFIX }}-frontend:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max,ignore-error=true
+
+      - name: Day for the vulnerability database cache
+        if: steps.plan.outputs.missing != ''
+        id: day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the vulnerability database
+        if: steps.plan.outputs.missing != ''
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.day.outputs.day }}
+          restore-keys: trivy-db-
+
+      # The same gate as the image-build-scan job in ci.yml: HIGH and CRITICAL findings that have a fix
+      # fail the job, and nothing has been pushed yet. Both images are scanned before either is pushed,
+      # so a finding in one of them cannot leave the other behind in ECR.
+      - name: Scan the images before pushing
+        if: steps.plan.outputs.missing != ''
+        env:
+          MISSING: ${{ steps.plan.outputs.missing }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          mkdir -p "$HOME/.cache/trivy" "$RUNNER_TEMP/images"
+          status=0
+          for name in $MISSING; do
+            docker save -o "$RUNNER_TEMP/images/$name.tar" "${REGISTRY}/${NAME_PREFIX}-${name}:${TAG}"
+            echo "== $name"
+            docker run --rm --user "$(id -u):$(id -g)" \
+              -e TRIVY_CACHE_DIR=/cache -v "$HOME/.cache/trivy:/cache" \
+              -v "$RUNNER_TEMP/images:/images:ro" \
+              "$TRIVY_IMAGE" image --input "/images/$name.tar" \
+              --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress --skip-version-check || status=1
+          done
+          exit "$status"
+
+      # docker push sends the image that was just scanned, not a second build of it, so what is in ECR is
+      # what passed the scan.
+      - name: Push the scanned images
+        if: steps.plan.outputs.missing != ''
+        env:
+          MISSING: ${{ steps.plan.outputs.missing }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          for name in $MISSING; do
+            docker push "${REGISTRY}/${NAME_PREFIX}-${name}:${TAG}"
+          done
+
+      - name: Summary
+        env:
+          MISSING: ${{ steps.plan.outputs.missing }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          {
+            echo "### Images for \`${TAG}\`"
+            echo
+            for name in backend frontend; do
+              case " ${MISSING} " in
+                *" ${name} "*) result="built, scanned and pushed" ;;
+                *) result="already in ECR, not rebuilt" ;;
+              esac
+              echo "- \`${REGISTRY}/${NAME_PREFIX}-${name}:${TAG}\`: ${result}"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
