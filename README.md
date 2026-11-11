@@ -905,14 +905,14 @@ checks: nothing in it deploys.
 | Job | What it checks | Fails when |
 |-----|----------------|------------|
 | `changes` | Whether the Terraform, its tool settings or the workflow changed | it cannot decide |
-| `lint` | eslint and prettier (backend), eslint (frontend), hadolint on both Dockerfiles, shellcheck on the scripts, actionlint on the workflows, and that the local compose file is valid | any of them reports a problem |
+| `lint` | eslint and prettier (backend), eslint (frontend), hadolint on both Dockerfiles, shellcheck on the scripts, actionlint on the workflows, `scripts/check-workflows.sh` (the [hardening rules](#hardening-step-28)), and that the local compose file is valid | any of them reports a problem |
 | `unit-tests` | The backend Jest suite, with the coverage report kept as an artifact for 14 days | a test fails |
 | `integration-tests` | The migrations from scratch, then the integration test, against a `postgres:17` service container | a migration or a test fails |
 | `dependency-scan` | trivy on both lockfiles: production dependencies, HIGH and CRITICAL | any such finding |
 | `secret-scan` | gitleaks on the full history, against `.gitleaks-baseline.json` | a new secret |
 | `image-build-scan` | Builds both images (nothing is pushed) and scans them with trivy, HIGH and CRITICAL that have a fix | any such finding |
 | `iac-checks` | `terraform fmt`, `validate` in `bootstrap`, `staging` and `prod`, tflint and checkov | any of them reports a problem. Runs only when `infra/`, `.tflint.hcl`, `.checkov.yaml` or `ci.yml` changed |
-| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh`, `notify.sh` and `rollback-check.sh` | a check fails |
+| `script-tests` | The tests for `deploy.sh`, `smoke-test.sh`, `ecr-tag-status.sh`, `ssm-deploy.sh`, `promote-image.sh`, `notify.sh`, `rollback-check.sh` and `check-workflows.sh` | a check fails |
 
 **How it is built.**
 
