@@ -40,8 +40,9 @@ module "security_groups" {
 }
 
 module "ecr" {
-  source      = "../../modules/ecr"
-  name_prefix = local.name_prefix
+  source       = "../../modules/ecr"
+  name_prefix  = local.name_prefix
+  force_delete = !var.deletion_protection # staging deletes its images with the repositories; production keeps them
 }
 
 module "rds" {

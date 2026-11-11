@@ -227,7 +227,7 @@ variable "db_backup_retention_period" {
 # ---------- protection and retention ----------
 variable "deletion_protection" {
   type        = bool
-  description = "true (production): the database and load balancer cannot be deleted by accident, the database takes a final snapshot, the access log bucket is kept and secrets keep a recovery window. false (staging): all of that is off so the environment can be destroyed cleanly."
+  description = "true (production): the database and load balancer cannot be deleted by accident, the database takes a final snapshot, the access log bucket and the images in the ECR repositories are kept and secrets keep a recovery window. false (staging): all of that is off so the environment can be destroyed cleanly."
 }
 
 variable "allow_db_snapshot" {
