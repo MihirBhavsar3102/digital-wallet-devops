@@ -5,8 +5,8 @@ with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
 > **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR,
 > IAM, compute, the load balancer, the database, the staging/production variables, the quality gates,
-> the application images, `deploy.sh` and a first manual deploy are in place. The pipeline and monitoring
-> are not written yet.
+> the application images, `deploy.sh`, a first manual deploy, the local compose setup, the integration test
+> and the smoke test are in place. The pipeline and monitoring are not written yet.
 
 ## Terraform state
 
@@ -601,6 +601,68 @@ The backend signs its tokens with a JWT key. `infra/modules/secrets/` creates a 
 - The JWT key in `app/docker-compose.yml` is the upstream project's demo value and is public. It must never be
   used in AWS, and the pipeline step removes it from the compose file.
 
+## Local development and tests
+
+You need Docker and Node 22. Everything below runs from the repository root.
+
+### Run the app locally
+
+```
+cp app/.env.example app/.env       # then fill in both values: openssl rand -hex 32
+cd app && docker compose up --build
+```
+
+The frontend is on <http://localhost:8080> and the backend on <http://localhost:8081/api> (Swagger on
+`/api/docs`). Compose starts the database, waits for it to be healthy, runs `prisma migrate deploy` from the
+same backend image that AWS uses, and only then starts the backend. It stops with a message if a secret is
+missing from `app/.env`, and nothing secret is in the compose file.
+
+- **Changing the password later.** Postgres only reads `POSTGRES_PASSWORD` when its volume is first created,
+  so after editing `app/.env` run `docker compose down -v` once (it deletes the local database).
+- **Why the local frontend differs from the AWS one.** On AWS the load balancer sends `/api/*` to the backend,
+  so the image is built with the relative `/api`. Locally nothing does that, so compose builds the frontend
+  with the backend's full URL; the backend's CORS setting allows `http://localhost:8080`. Only the `/api`
+  build is ever pushed to ECR. The browser needs port 8080 to be free for the same CORS reason.
+
+### Tests
+
+| Test | Command | Needs |
+|------|---------|-------|
+| Unit (Jest, no database) | `cd app/backend && npm ci && npm test` | Node |
+| Integration (the real app against a real PostgreSQL) | see below | a migrated database |
+| Smoke test (a deployed app answers) | `scripts/smoke-test.sh <base-url>` | `curl` |
+| `deploy.sh` and `smoke-test.sh` themselves | `docker run --rm -v "$PWD:/repo:ro" python:3-slim bash /repo/scripts/tests/deploy.test.sh` (and `smoke-test.test.sh`) | Docker |
+
+**Integration test.** `app/backend/test/wallet.integration-spec.ts` registers two users, logs them in, opens
+accounts, deposits and transfers, and checks both balances; it also checks that a transfer larger than the
+balance is refused and changes nothing, and that a request without a token gets 401. Nothing is mocked. It has
+its own Jest config and script (`npm run test:integration`) and a file pattern the unit tests never match, so
+CI can run it as a separate job. It needs `DATABASE_URL` for a database where the migrations have been
+applied (`JWT_SECRET_KEY` defaults to a test value):
+
+```
+cd app && docker compose up -d db
+docker compose exec -T db createdb -U pgadmin digital_wallet_test
+cd backend
+export DATABASE_URL="postgresql://pgadmin:<POSTGRES_PASSWORD>@localhost:6432/digital_wallet_test"
+npx prisma migrate deploy && npm run test:integration
+```
+
+The CI job in step 2.2 is meant to run the same two commands against a `postgres:17` service container.
+
+**Smoke test.** `scripts/smoke-test.sh <base-url> [api-base-url]` retries until the frontend serves the app's
+page and `/api/health` answers `{"status":"ok"}`. It checks what comes back, not only the status code,
+because the first-boot placeholder also answers 200 on `/` and `/api`. Locally:
+`scripts/smoke-test.sh http://localhost:8080 http://localhost:8081`.
+
+**Linting the Dockerfiles and scripts** (the checks the CI lint job in step 2.2 is meant to run):
+`docker run --rm -i hadolint/hadolint < app/backend/Dockerfile` and
+`docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:stable /mnt/scripts/*.sh /mnt/scripts/tests/*.sh`.
+
+**npm 12.** On a machine with npm 12 (npm blocks dependency install scripts by default), run
+`npm run prisma:generate` after `npm ci`, and bcrypt's `node-pre-gyp install` inside `node_modules/bcrypt`.
+The images and CI use Node 22 with npm 10, where those scripts run.
+
 ## Application images and deploy
 
 Each instance runs two containers, the backend and the frontend, pulled from ECR. `scripts/deploy.sh`
@@ -693,7 +755,7 @@ known limit. This is not decided yet.
 | `infra/modules/` | Reusable Terraform modules |
 | `infra/envs/staging/`, `infra/envs/prod/` | One folder per environment, both calling the same modules |
 | `.github/workflows/` | GitHub Actions pipelines |
-| `scripts/` | The deploy script and its tests (`scripts/tests/`); the smoke test comes with the pipeline |
+| `scripts/` | The deploy script, the smoke test, and the tests for both (`scripts/tests/`) |
 | `monitoring/` | CloudWatch agent configuration |
 | `docs/` | Challenges log and approach documentation |
 | `.tflint.hcl`, `.checkov.yaml`, `.pre-commit-config.yaml`, `.gitleaks-baseline.json` | Quality gate configuration (see [Quality gates](#quality-gates)) |
