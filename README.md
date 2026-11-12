@@ -636,9 +636,10 @@ secret's ARN, the database log group names, the application and system log group
 step 3.1), the access log bucket, and the GitHub deploy role ARN. The state bucket's name is an output of
 `infra/bootstrap/`, where the bucket is created.
 
-The dashboard outputs (`dashboard_names`, `dashboard_urls`, `saved_query_names`, step 3.6) are there too. Not written
-yet: the `alarm_email` variable and the SNS topic output, which come with the alarms (step 3.7 of
-[Part 3](#monitoring-and-logging-part-3)).
+The dashboard and alarm outputs (`dashboard_names`, `dashboard_urls`, `saved_query_names`, `alarm_names`,
+`alarm_topic_arn`; steps 3.6 and 3.7 of [Part 3](#monitoring-and-logging-part-3)) are there too. There is **no
+`alarm_email` variable in an environment**: the alarm topic and the address live in `infra/bootstrap`, see
+[Alarms and notifications](#alarms-and-notifications-step-37).
 
 ## JWT secret
 
@@ -881,6 +882,7 @@ and a line here, so the reason is next to the code and also in one list.
 | `CKV2_AWS_57` | JWT secret | Automatic rotation would sign out every logged-in user; the key is rotated deliberately by increasing `secret_version` |
 | `CKV2_AWS_5` | the three security groups | checkov scans each module on its own; the groups are attached in the load balancer, compute and rds modules |
 | `CKV_AWS_394` | availability zone lookup | Only the first `az_count` names are used, and a zone added later sorts last, so the chosen zones do not change |
+| `CKV_AWS_26` | alarm topic (`infra/bootstrap`) | An alarm message holds an alarm name, a metric and a threshold. CloudWatch cannot use the AWS-managed SNS key, and a customer-managed key with a wrong policy fails silently (the alarm cannot publish and nobody is told) |
 
 **trivy** is used as a second opinion and is not a gate, so its findings are not suppressed twice. It reports 13
 distinct findings, all in the same categories as the table (plain HTTP, customer-managed keys, versioning,
@@ -1448,8 +1450,8 @@ triggered the run, the commit (with a link) and the run's URL.
 - **The topic uses the AWS-managed key (`alias/aws/sns`).** It is free, and checkov wants topics encrypted. The key's
   policy, read in this account, allows any principal in the account that may use SNS to publish through SNS, so the
   publisher role needs `sns:Publish` and nothing for KMS. **This key cannot be used for CloudWatch alarms**:
-  CloudWatch cannot be granted use of an AWS-managed key, so the alarm topic of the monitoring step needs a
-  customer-managed key, or none.
+  CloudWatch cannot be granted use of an AWS-managed key, so the alarm topic needs a customer-managed key, or none. It
+  has none (see [Alarms and notifications](#alarms-and-notifications-step-37)).
 - **The role trusts two token subjects**, in the immutable form (see
   [GitHub Actions deploy roles](#github-actions-deploy-roles-oidc)): a run on `main`
   (`...:ref:refs/heads/main`, which is `cd.yml`) and a pull request of this repository (`...:pull_request`, which is
@@ -1997,6 +1999,88 @@ free account gets; that was not checked here.
 - **A plan against live staging:** 9 to add (2 dashboards, 7 queries), 0 to change, 0 to destroy. Checkov and tflint clean.
 - **Not applied yet.** After the apply the panels should be checked with real data: the CloudWatch agent and Auto
   Scaling series, the load balancer series, and the database series.
+
+### Alarms and notifications (step 3.7)
+
+Ten CloudWatch alarms in `infra/modules/observability/alarms.tf`, all notifying one SNS topic by e-mail, **when an alarm
+goes into ALARM and again when it recovers** (not on "insufficient data", which would be noise).
+
+#### Where the topic lives, and what to apply
+
+The plan puts the alarm topic inside the environment. It is in `infra/bootstrap/` instead, next to the pipeline topic,
+for the reason that topic already documents: **an e-mail subscription that is recreated has to be confirmed again by
+clicking a link, and staging is destroyed and rebuilt every day**. A topic inside the environment would need a new
+confirmation after every rebuild. This one is confirmed once, and staging and production both publish to it (every alarm
+name starts with its environment's name). The environments find it by name (`data "aws_sns_topic"`), so no ARN is
+committed.
+
+The address is the bootstrap variable `alarm_email` (sensitive, validated), kept in the git-ignored
+`infra/bootstrap/local.tfvars`. Order:
+
+1. `cd infra/bootstrap && terraform apply -var-file=local.tfvars`: creates the topic and the subscription (plan: 2 to
+   add). AWS then sends a **"Subscription Confirmation" e-mail: click its link once**. Until then nothing is delivered.
+2. Then apply the environment as usual. Without the topic its plan stops with `reading SNS Topic
+   (digital-wallet-alarms): empty result`, on purpose (checked).
+
+The topic has **no encryption**. CloudWatch cannot be granted use of the AWS-managed SNS key, so encrypting it would need
+a customer-managed key whose policy allows CloudWatch, and a mistake in that policy fails silently: the alarm cannot
+publish and nobody is told. The messages hold an alarm name, a metric and a threshold (accepted finding `CKV_AWS_26`).
+
+#### The alarms
+
+The thresholds are one variable, `alarm_thresholds`, and the dashboards draw the same numbers as a red line. They are
+**starting points to tune once there is a baseline**. The p95 latency (1 second) is a placeholder until step 3.8 measures
+one.
+
+| Alarm | Fires when | Missing data |
+|-------|------------|--------------|
+| `ec2-cpu-high` | agent CPU, average, above 80% for 2 x 5 minutes | not breaching |
+| `ec2-memory-high` | memory used above 85% for 2 x 5 minutes | **breaching** |
+| `ec2-disk-high` | root disk above 80% for 2 x 5 minutes | **breaching** |
+| `alb-5xx-rate-high` | `100 * FILL(5xx, 0) / RequestCount` above 5% for 5 one-minute periods in a row | not breaching |
+| `api-latency-p95-high` | p95 of the backend's `TargetResponseTime` above 1 s for 2 x 5 minutes; too few samples are ignored | not breaching |
+| `alb-backend-unhealthy-hosts`, `alb-frontend-unhealthy-hosts` | one or more unhealthy targets for 3 minutes in a row | not breaching |
+| `application-errors` | the error metric of step 3.4 is 1 or more in 5 minutes | not breaching |
+| `rds-cpu-high` | database CPU above 80% for 2 x 5 minutes | **breaching** |
+| `rds-free-storage-low` | free storage below 2 GiB for 2 x 5 minutes | **breaching** |
+
+**`treat_missing_data` is chosen for each alarm, because "no data" means different things.** *Breaching* where the metric
+should always exist: memory and disk (the agent can fail to start without failing the boot, see
+[CloudWatch agent](#cloudwatch-agent-step-32), so its silence has to alarm) and the database (RDS always publishes). *Not
+breaching* where an idle system publishes nothing: no requests means no latency and no 5xx rate, and no errors means no
+data point. The CPU alarm is *not breaching* because the memory and disk alarms already cover a silent agent. One false
+alarm to expect: replacing the only staging instance leaves a gap in the agent's metrics, so memory and disk can alarm once
+after a change to the launch template.
+
+#### Test the path
+
+After the apply and the confirmation, force a state and check that the e-mail arrives (it returns to OK by itself at the
+next evaluation, which sends the recovery e-mail):
+
+```sh
+aws cloudwatch set-alarm-state --alarm-name digital-wallet-staging-application-errors \
+  --state-value ALARM --state-reason "testing the notification path"
+```
+
+#### Checked, and not yet
+
+- **A plan of the alarms** in a throwaway root with the real staging values: 19 to add (2 dashboards, 7 queries, 10
+  alarms), the ten names as above. A plan of `infra/bootstrap`: 2 to add (the topic and the subscription), 0 to change.
+- **CloudWatch accepted the two unusual alarm shapes** under temporary names, deleted straight after: the metric math
+  one with `FILL` (5 of 5 periods, not breaching) and the percentile one (p95, low samples ignored). The first attempt at
+  the percentile one failed on my own typo of the CLI flag, which is singular, `--evaluate-low-sample-count-percentile`;
+  the Terraform argument is plural, and `validate` accepted it.
+- **checkov** is at 318 passed, 0 failed, 60 skipped (`main`: 309 / 0 / 59): nothing from `main` was lost, each alarm adds
+  one check, and the one new skip is the documented topic.
+- **Not applied yet**, so not checked: that the subscription is confirmed, that an alarm e-mail arrives, and that
+  `set-alarm-state` works end to end.
+
+#### Not done
+
+- **Encrypting the topic** with a customer-managed key (above).
+- **An alarm-status panel** on the dashboard, and composite alarms (for example one that pages only when the 5xx rate
+  and the unhealthy hosts are both bad).
+- **A topic per environment.** Production alarms go to the same address as staging's.
 
 ## Credits
 
