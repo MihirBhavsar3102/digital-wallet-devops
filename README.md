@@ -636,8 +636,9 @@ secret's ARN, the database log group names, the application and system log group
 step 3.1), the access log bucket, and the GitHub deploy role ARN. The state bucket's name is an output of
 `infra/bootstrap/`, where the bucket is created.
 
-Not written yet: the `alarm_email` variable, and the SNS topic and dashboard outputs. They are added with the
-alarms and dashboards of [Part 3](#monitoring-and-logging-part-3).
+The dashboard outputs (`dashboard_names`, `dashboard_urls`, `saved_query_names`, step 3.6) are there too. Not written
+yet: the `alarm_email` variable and the SNS topic output, which come with the alarms (step 3.7 of
+[Part 3](#monitoring-and-logging-part-3)).
 
 ## JWT secret
 
@@ -811,7 +812,7 @@ known limit. This is not decided yet.
 |------|---------|
 | `app/` | The sample application (imported unmodified, then changed in later commits) |
 | `infra/bootstrap/` | One-off Terraform that creates the remote-state bucket and the account-wide GitHub OIDC provider |
-| `infra/modules/` | Reusable Terraform modules (`monitoring/`: log groups, and from the later steps of Part 3 the dashboards, saved queries and alarms) |
+| `infra/modules/` | Reusable Terraform modules (`monitoring/`: log groups, the agent's configuration and the error metric; `observability/`: the dashboards and saved queries, and from step 3.7 the alarms) |
 | `infra/envs/staging/`, `infra/envs/prod/` | One folder per environment, both calling the same modules |
 | `.github/workflows/` | GitHub Actions pipelines (`ci.yml` for pull requests) |
 | `.github/dependabot.yml` | One weekly pull request with all minor and patch dependency updates (npm, Docker, GitHub Actions, Terraform) |
@@ -1632,7 +1633,7 @@ latency **at the edge**, as the client sees them, not timings inside the applica
 | Request rate, error rate, latency | `AWS/ApplicationELB` metrics, error rate by metric math | 3.4 |
 | Database metrics | `AWS/RDS`, enhanced monitoring, Performance Insights | 3.5 |
 | Application, system and access logs | the log groups below | 3.1 to 3.3 |
-| Dashboards, saved queries, alarms | `monitoring` module | 3.6, 3.7 |
+| Dashboards, saved queries, alarms | `observability` module | 3.6, 3.7 |
 
 ### Log groups (step 3.1)
 
@@ -1934,6 +1935,68 @@ It is free, and a plan against live staging shows it as an in-place change of th
   metric format), which would give timings inside the code. It is the next improvement.
 - **Per-route metrics.** The logs have `path` and `durationMs`, so Logs Insights can compute them (step 3.6), but there
   is no metric per route.
+
+### Dashboards and saved queries (step 3.6)
+
+Two CloudWatch dashboards and seven saved Logs Insights queries, all Terraform, in `infra/modules/observability/`.
+After an apply, `terraform output dashboard_urls` prints the console links. Each panel is titled as the question it
+answers, a threshold that has an alarm is drawn on the panel as a red horizontal line (from the same variable the
+alarm uses, `alarm_thresholds`), and all panels share one default time range (3 hours) and a 60 second period, except
+the EC2 metrics, which AWS publishes every 5 minutes.
+
+**Why a module of its own.** The dashboards need the Auto Scaling group, the load balancer and the database, and the
+compute module already takes its log group names from `monitoring`. Putting the dashboards in `monitoring` made the two
+modules refer to each other. Terraform accepted that and `plan` was clean, but **checkov silently stopped checking one
+IAM policy**: its total fell from 309 to 299 passed checks with 0 failed, so the gate got weaker and stayed green
+(challenges log, row 20). `observability` is called last and only reads from the other modules, and checkov is back to
+309 / 0 / 59, identical to `main`.
+
+**Dashboard 1, `<name_prefix>-infrastructure`:** *Are the instances busy?* (CPU %, average and busiest, alarm line) ·
+*Is memory running out?* · *Is the disk filling up?* · *How much data moves in and out?* · *How many instances are serving
+traffic?* (in service against wanted) · *Are the instances passing EC2's own health checks?* · then the database: *Is the
+database busy?* (CPU %) · *How many connections are open?* · *Is it short of memory?* · *How much storage is left?* (alarm
+line at 2 GiB) · *How much I/O is it doing?* · *How long do reads and writes take?* · *Is I/O queuing up?* · *How busy is it
+overall?* (Performance Insights `DBLoad`).
+
+**Dashboard 2, `<name_prefix>-application`:** *How much traffic is there?* · *What is being returned?* (2xx, 4xx and 5xx per
+minute) · *What share of requests fail?* (the `FILL` formula of [Metrics](#error-rate-and-why-fill), alarm line at 5%) ·
+*How long does the API take to answer?* (p50, p95 and p99 of the backend target, alarm line on p95) · *Are the targets
+healthy?* (both target groups) · *Is the application logging errors?* (the metric of step 3.4) · and three tables from the
+backend log: *What went wrong most recently?*, *Which endpoints are slowest?* (p95) and *Which endpoints fail?*.
+
+**Saved queries**, named `<name_prefix>/<name>` in the Logs Insights console (the dashboard's tables run the same text, so
+the two cannot drift apart). The time range is picked in the console, so "in the last hour" means setting 1h.
+
+| Query | Answers |
+|-------|---------|
+| Backend errors | the error and fatal lines, newest first (the exception and its request line) |
+| Slowest requests | the 20 slowest single requests, with their request ID |
+| Slowest paths (p95) | count, average, p95 and maximum duration per path |
+| Failed requests by path (4xx and 5xx) | which endpoints fail, and how |
+| 5xx by path | only our failures, by path and status |
+| Failed application logins | requests to `/api/auth/login` that did not succeed |
+| Failed authentication on the host (auth.log) | failed, denied or invalid authentication lines in `auth.log` |
+
+There is no SSH here (access is through SSM), so the last query finds failed authentication on the host (PAM, `sudo`),
+not failed SSH logins.
+
+**Cost.** Two dashboards per environment, so four if production is ever applied. AWS's pricing page says how many a
+free account gets; that was not checked here.
+
+#### Checked, and not yet
+
+- **CloudWatch accepted both dashboard bodies.** Terraform cannot validate them, so a malformed widget would only fail
+  at the apply. `put-dashboard` validates the schema without the metrics needing to exist: both bodies were accepted
+  with no validation messages (16 and 11 widgets, 24 and 15 metric series), under a temporary name that was deleted
+  straight after (none left).
+- **All seven queries ran on live staging** and completed. The numbers agree with what had been done: the two deliberate
+  500s show up on `/api/auth/login` in every query that should see them (4 `error` lines for 2 failures, 2 in *5xx by
+  path*, 3 in *Failed application logins*, which counts the 401 as well). *Failed authentication on the host* returned no
+  rows, which is right (nothing has failed to authenticate); to prove its case-insensitive regex works, the same form of
+  filter was run against lines that do exist (`NEW USER` matched `new user`).
+- **A plan against live staging:** 9 to add (2 dashboards, 7 queries), 0 to change, 0 to destroy. Checkov and tflint clean.
+- **Not applied yet.** After the apply the panels should be checked with real data: the CloudWatch agent and Auto
+  Scaling series, the load balancer series, and the database series.
 
 ## Credits
 
