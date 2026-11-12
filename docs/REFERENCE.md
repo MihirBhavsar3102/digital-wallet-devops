@@ -1197,7 +1197,7 @@ The gate also protects the AWS role. Production's deploy role trusts only a toke
    it has to start with the name prefix, which is what the role's permission matches, and it is unique per run
    attempt. Migrations are part of a deploy and a rollback of the code cannot undo them, so the deploy does not
    start until the snapshot is available. These manual snapshots are kept until someone deletes them: how long
-   to keep them is part of the backup strategy (step 4.3).
+   to keep them is in [Backup strategy](BACKUPS.md): the newest 5.
 5. **Deploys** with `scripts/ssm-deploy.sh prod <tag>`, the script of the staging job, to the instances tagged
    `environment=prod`, one at a time.
 6. **Smoke-tests** through the production load balancer, with the same script.
