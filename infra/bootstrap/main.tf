@@ -121,6 +121,23 @@ resource "aws_sns_topic_subscription" "pipeline_alerts_email" {
   endpoint  = var.alert_email
 }
 
+# ---------- CloudWatch alarm notifications (step 3.7)
+# Here, and not in an environment, for the same reason as the pipeline topic above: an e-mail subscription that
+# is recreated has to be confirmed again by clicking a link, and an environment is destroyed and rebuilt every
+# day, so a topic inside it would need a new confirmation after every rebuild. This one is confirmed once.
+# Staging and production both publish to it (the alarm names start with the environment's name).
+# The environments find it by name (data "aws_sns_topic"), so apply this directory before an environment.
+resource "aws_sns_topic" "alarms" {
+  #checkov:skip=CKV_AWS_26:An alarm message holds an alarm name, a metric and a threshold, nothing sensitive. CloudWatch cannot be granted use of the AWS-managed key (alias/aws/sns), so encrypting this topic would need a customer-managed key with its own policy, and a mistake in that policy fails silently: the alarm cannot publish and nobody is told.
+  name = "${var.project}-alarms"
+}
+
+resource "aws_sns_topic_subscription" "alarms_email" {
+  topic_arn = aws_sns_topic.alarms.arn
+  protocol  = "email"
+  endpoint  = var.alarm_email
+}
+
 locals {
   github_subject_prefix = "repo:${split("/", var.github_repository)[0]}@${var.github_owner_id}/${split("/", var.github_repository)[1]}@${var.github_repository_id}"
 }

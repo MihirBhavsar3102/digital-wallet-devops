@@ -13,6 +13,11 @@ output "pipeline_alerts_topic_arn" {
   value       = aws_sns_topic.pipeline_alerts.arn
 }
 
+output "alarm_topic_arn" {
+  description = "ARN of the SNS topic that e-mails the CloudWatch alarms. The environments look it up by name, so this is for information."
+  value       = aws_sns_topic.alarms.arn
+}
+
 output "github_notify_role_arn" {
   description = "ARN of the role the notify jobs assume to publish to that topic; the repository variable NOTIFY_ROLE_ARN."
   value       = aws_iam_role.github_notify.arn

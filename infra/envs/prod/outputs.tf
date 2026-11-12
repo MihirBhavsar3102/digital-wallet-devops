@@ -95,7 +95,7 @@ output "app_log_group_names" {
   value       = module.monitoring.log_group_names
 }
 
-# ---------- dashboards and saved queries ----------
+# ---------- dashboards, saved queries and alarms ----------
 output "dashboard_names" {
   description = "Names of the two CloudWatch dashboards, by kind (infrastructure, application)."
   value       = module.observability.dashboard_names
@@ -104,6 +104,16 @@ output "dashboard_names" {
 output "dashboard_urls" {
   description = "Console links to the two dashboards, by kind."
   value       = module.observability.dashboard_urls
+}
+
+output "alarm_names" {
+  description = "Names of the CloudWatch alarms of this environment."
+  value       = module.observability.alarm_names
+}
+
+output "alarm_topic_arn" {
+  description = "ARN of the SNS topic the alarms notify (created in infra/bootstrap)."
+  value       = data.aws_sns_topic.alarms.arn
 }
 
 output "saved_query_names" {

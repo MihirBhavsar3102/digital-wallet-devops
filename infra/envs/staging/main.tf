@@ -124,7 +124,14 @@ module "compute" {
   cloudwatch_agent_config_parameter = module.monitoring.agent_config_parameter_name
 }
 
-# Dashboards and saved queries (and the alarms, in the next step). Called last, because it only reads from the
+# The alarm topic and its confirmed e-mail subscription are created once, in infra/bootstrap (an e-mail
+# subscription has to be confirmed by a click, and this environment is rebuilt every day). Found by name, so
+# apply infra/bootstrap before the first apply here: without the topic this lookup fails, on purpose.
+data "aws_sns_topic" "alarms" {
+  name = "${var.project}-alarms"
+}
+
+# Dashboards, saved queries and alarms. Called last, because it only reads from the
 # modules above. It is not part of "monitoring": that module is an input of compute, and one that also read
 # compute's outputs would be circular (see modules/observability/variables.tf).
 module "observability" {
@@ -137,4 +144,5 @@ module "observability" {
   db_instance_identifier           = module.rds.identifier
   log_group_names                  = module.monitoring.log_group_names
   application_errors_metric        = module.monitoring.application_errors_metric
+  alarm_topic_arn                  = data.aws_sns_topic.alarms.arn
 }
