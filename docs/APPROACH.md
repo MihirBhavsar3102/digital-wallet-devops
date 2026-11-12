@@ -60,6 +60,9 @@ onward.
   instead of applying from a laptop.
 - **Supply chain**: image signing, SBOMs, and pinning the OIDC trust to the workflow file.
 - **Safer releases**: blue/green or canary, and Auto Scaling policies on the metrics already collected.
+- **Secret-management write-up and proof** (planned step 4.2, deferred). The controls exist and are described in the
+  README, but the write-up is not done: a repeatable check that searches the repository and the state for the password and
+  shows that outputs hold only ARNs, how the JWT key would be rotated, and a limited-privilege application user.
 - **Database password rotation**: today a running backend keeps the password it started with, so the backend needs
   a restart or deploy after each rotation. The fix is to re-read the secret when a connection fails (or use RDS
   Proxy), and an application database user with limited privileges instead of the master user.

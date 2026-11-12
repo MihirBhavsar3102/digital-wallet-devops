@@ -52,7 +52,7 @@ flowchart TB
 | `.github/workflows/` | `ci.yml` (pull requests), `cd.yml` (build, staging, production), `rollback.yml` (manual) |
 | `scripts/` | Deploy, smoke test, rollback and notification scripts, the load test, and a test for each (`scripts/tests/`) |
 | `monitoring/` | The CloudWatch agent configuration |
-| `docs/` | [APPROACH.md](docs/APPROACH.md) (how it was built and why), [REFERENCE.md](docs/REFERENCE.md) (the long build record, one section per part), [CHALLENGES.md](docs/CHALLENGES.md) (problems hit and fixed) |
+| `docs/` | [APPROACH.md](docs/APPROACH.md) (how it was built and why), [REFERENCE.md](docs/REFERENCE.md) (the long build record, one section per part), [BACKUPS.md](docs/BACKUPS.md) (backup strategy, restore procedure and a measured restore drill), [CHALLENGES.md](docs/CHALLENGES.md) (problems hit and fixed) |
 
 Versions used (taken from the machine that built this on 2026-11-12). Terraform 1.11 or later is required,
 because the JWT secret uses a write-only argument.
@@ -218,6 +218,15 @@ Each row is a decision with real alternatives; the context, consequences and wha
 
 Findings the scanners report and that were accepted on purpose are listed, with the reason for each, under
 [Quality gates](docs/REFERENCE.md#quality-gates) in the reference.
+
+### Backups and recovery
+
+The database is the only state worth backing up. RDS takes automated backups (1 day of point-in-time restore in
+staging, 7 days in production, in a 02:30 to 03:00 IST window), the pipeline takes a named snapshot before every
+production deploy, and the Terraform state bucket is versioned. The instances are stateless and rebuilt by the Auto
+Scaling group from ECR, so they are not backed up. A restore drill on staging brought the database back in about
+13 to 15 minutes, with the latest restorable point 3 to 8 minutes behind the clock. The procedure, the measurements
+and what was not tested (production has never been applied) are in [docs/BACKUPS.md](docs/BACKUPS.md).
 
 ## 6. Cost optimization
 
