@@ -1,14 +1,11 @@
-# digital-wallet-devops
+# Reference: how each part was built and checked
 
-A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app and run it on AWS
-with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
+This is the long-form build record that used to be the README: one section per piece of the system, with
+what was decided, what was checked on staging and what was not. The [README](../README.md) is the short
+version, and [APPROACH.md](APPROACH.md) explains the order of work and the trade-offs.
 
-> **Status: work in progress.** Parts 1 to 3 are in place: the infrastructure (state, network, security groups,
-> ECR, IAM, compute, load balancer, database, staging and production), the CI/CD pipeline (pull-request checks,
-> build, staging deploy, approval-gated production deploy, rollback, notifications, hardening), and monitoring and
-> logging (log groups, the CloudWatch agent, JSON application and access logs, metrics, two dashboards, saved
-> queries, alarms, and a load test that was run against all of it). Part 4, the documentation and write-up, is next.
-> Production has never been applied; see [Not run end to end](#not-run-end-to-end-production-has-never-been-applied).
+Comments in the code that say "the README" followed by a section name mean the section of this file.
+Production has never been applied; see [Not run end to end](#not-run-end-to-end-production-has-never-been-applied).
 
 ## Terraform state
 
@@ -1666,7 +1663,7 @@ plan` reported `No changes`, so staging was exactly `main`.
 ### CloudWatch agent (step 3.2)
 
 EC2 reports CPU on its own, but **not memory or disk**, so each instance runs the CloudWatch agent. Its
-configuration is written by hand in [`monitoring/cloudwatch-agent.json`](monitoring/cloudwatch-agent.json).
+configuration is written by hand in [`monitoring/cloudwatch-agent.json`](../monitoring/cloudwatch-agent.json).
 
 | What | Setting | Why |
 |------|---------|-----|
@@ -2171,14 +2168,3 @@ fired. There is no limit found yet: at 4 times the load the instance was at 18% 
 - **Not done:** a run that finds where the instance gives way; a CPU alarm test with real CPU (for example a short busy
   loop through SSM); HTTPS (the load goes over plain HTTP); more than one instance; and tuning the other thresholds,
   which keep the plan's starting values.
-
-## Credits
-
-The application in `app/` is [tedrosdev/digital-wallet](https://github.com/tedrosdev/digital-wallet),
-imported at upstream commit `011bd00b2e43aee3c9f955b4bd84b73ac40338b7` (2024-12-23). The first commit
-in this repository is that import, with file contents unchanged, so every later commit shows what
-was changed on top of it. Its original README is kept at `app/UPSTREAM_README.md`.
-
-Licence note: the upstream README says the project is MIT-licensed and links to a `LICENSE` file, but
-no `LICENSE` file exists in the upstream repository, and its `backend/package.json` declares
-`"license": "UNLICENSED"`. No licence text has therefore been copied here.
