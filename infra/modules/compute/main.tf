@@ -82,6 +82,8 @@ resource "aws_launch_template" "app" {
     db_port                = var.db_port
     db_name                = var.db_name
     db_secret_arn          = var.db_secret_arn
+    backend_log_group      = var.backend_log_group_name
+    frontend_log_group     = var.frontend_log_group_name
     agent_config_parameter = var.cloudwatch_agent_config_parameter
     deploy_script_b64      = base64encode(file("${path.module}/../../../scripts/deploy.sh"))
   }))

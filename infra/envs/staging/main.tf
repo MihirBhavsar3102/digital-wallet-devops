@@ -119,5 +119,7 @@ module "compute" {
   db_name               = module.rds.db_name
   db_secret_arn         = module.rds.master_user_secret_arn
 
+  backend_log_group_name            = module.monitoring.log_group_names["backend"]
+  frontend_log_group_name           = module.monitoring.log_group_names["frontend"]
   cloudwatch_agent_config_parameter = module.monitoring.agent_config_parameter_name
 }

@@ -47,10 +47,17 @@ rm -f /tmp/amazon-cloudwatch-agent.deb
 /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c ssm:${agent_config_parameter} \
   || echo "the CloudWatch agent did not start: this instance runs without memory and disk metrics and system logs"
 
+# --- Who this instance is. IMDSv2 is required on these instances, so the metadata calls need a session token.
+TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
 # --- /opt/app, instance settings and deploy.sh
 mkdir -p /opt/app/placeholder
 # deploy.sh sources this file. None of the values is secret (the database password stays in
-# Secrets Manager). The ARN contains "!", so the database values are quoted.
+# Secrets Manager). The ARN contains "!", so the database values are quoted. The instance ID and the
+# log group names are where deploy.sh sends the containers' logs: the stream is the instance ID, as for
+# the CloudWatch agent's syslog and auth logs.
 cat > /opt/app/instance.env <<ENV_EOF
 REGION=${region}
 ACCOUNT_ID=${account_id}
@@ -61,16 +68,14 @@ DB_HOST="${db_host}"
 DB_PORT="${db_port}"
 DB_NAME="${db_name}"
 DB_SECRET_ARN="${db_secret_arn}"
+INSTANCE_ID=$INSTANCE_ID
+BACKEND_LOG_GROUP=${backend_log_group}
+FRONTEND_LOG_GROUP=${frontend_log_group}
 ENV_EOF
 echo "${deploy_script_b64}" | base64 -d > /opt/app/deploy.sh
 chmod 0750 /opt/app/deploy.sh
 
 # --- Placeholder container: lets load balancer health checks pass before the first real deploy.
-# IMDSv2 is required on these instances, so the metadata calls need a session token.
-TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-
 cat > /opt/app/placeholder/index.html <<HTML_EOF
 <!doctype html><title>Digital Wallet placeholder</title>
 <h1>Digital Wallet: placeholder</h1>
