@@ -2,9 +2,14 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ValidationPipe } from '@nestjs/common';
+import { JsonLogger } from './common/json-logger';
+import { createRequestLogger } from './common/request-logger';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // One JSON object per line on stdout, for CloudWatch (Docker's awslogs driver ships stdout).
+  const logger = new JsonLogger();
+  const app = await NestFactory.create(AppModule, { logger });
+  app.use(createRequestLogger(logger));
 
   // global prefix for all routes
   app.setGlobalPrefix('api');
@@ -29,7 +34,7 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
-  console.log(`Application is running on: http://localhost:${port}`);
-  console.log(`Swagger is available at: http://localhost:${port}/api/docs`);
+  logger.log(`Application is running on port ${port}`, 'Bootstrap');
+  logger.log(`Swagger is available at /api/docs`, 'Bootstrap');
 }
 bootstrap();
