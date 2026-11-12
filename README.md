@@ -1712,6 +1712,92 @@ agent does not start, `amazon-cloudwatch-agent-ctl -m ec2 -a status` shows its s
   appear under `CWAgent` with the dimension `AutoScalingGroupName` alone, that `cpu_usage_active` does too, that
   lines arrive in the syslog and auth log groups, and that `/var/log/auth.log` exists on this Ubuntu release.
 
+### Application and access logs (step 3.3)
+
+Three kinds of log lines reach CloudWatch, all as one JSON object per line, so that Logs Insights, a metric filter
+and `docker logs | jq` can read the fields:
+
+| Log | Written by | Log group |
+|-----|------------|-----------|
+| Backend: application and request lines | the NestJS backend, to stdout | `/<name_prefix>/backend` |
+| Frontend: the access log, and nginx's error log | the nginx container (JSON access log since step 2.1; the error log goes to stderr) | `/<name_prefix>/frontend` |
+| Load balancer access log | the load balancer, to S3 (see [Access logs](#access-logs)) | the S3 bucket, not CloudWatch |
+
+#### The backend's logs
+
+NestJS's default logger prints coloured text, and the version used here (10.4) has no JSON mode, so
+`app/backend/src/common/` has two small pieces and no new dependency:
+
+- **`json-logger.ts`** replaces Nest's logger (`NestFactory.create(AppModule, { logger })`), so Nest's own startup lines
+  and every `Logger` call in the code come out as JSON. A line has `time`, `level` (`info`, `warn`, `error`, `debug`,
+  `verbose`, `fatal`), `context` and `message`; an `Error` adds its `stack`, kept inside the one line. A plain object
+  passed as the message has its fields written at the top level, which is how the request line below gets its fields.
+  It never throws: a circular object or a failing output must not break the request being logged.
+- **`request-logger.ts`** is a middleware that writes one line when each response has finished:
+
+```json
+{"time":"2026-11-12T05:20:37.229Z","level":"warn","context":"http","message":"request completed","requestId":"3d072fc3-ef39-437b-8062-e4e77b733dfc","method":"GET","path":"/api/accounts/my-accounts","status":401,"durationMs":2.12}
+```
+
+  - The **level follows the status**: 5xx is `error`, 4xx `warn`, anything else `info`. The CloudWatch error metric of
+    step 3.4 counts the `error` lines, so a wrong password is not an application error and a failed database call is.
+  - The **request ID** is the caller's `X-Request-Id` when it is short and made of letters, digits, `.`, `_` and `-`,
+    and a new UUID otherwise (so a caller cannot put a line break or a megabyte into the log). It is also returned in
+    the response header. The load balancer's own `X-Amzn-Trace-Id` is logged beside it as `traceId`, to find the same
+    request in the load balancer's access log.
+  - The **path has no query string**, because a query can carry a token.
+  - **A healthy `/api/health` is not logged.** The load balancer calls it every few seconds from each of its nodes and
+    those lines would drown the real requests. An unhealthy answer is logged.
+- Two upstream lines were plain text and are now JSON as well: the guard's `console.error('JWT verification failed:',
+  err)`, which printed the whole error over several lines on every bad token, is one `warn` line with the reason (a
+  bad token is the caller's mistake, not a server error, and the token is never logged: tested); and
+  `UsersController initialized`.
+
+A database failure gives two `error` lines, Nest's own for the exception (with its stack) and the request line with
+`"status":500`. To read the logs live: `MSYS_NO_PATHCONV=1 aws logs tail /<name_prefix>/backend --follow` (Git Bash
+rewrites a leading `/`).
+
+#### Getting the containers' output to CloudWatch
+
+`deploy.sh` writes the compose file, and each service now has `logging: driver: awslogs`, with the region, the log
+group, and the **instance ID as the stream name** (so the same instance has the same stream name in all four groups).
+The values come from `/opt/app/instance.env`, which `user_data` writes (the instance ID, and the two group names that
+Terraform passes in); `deploy.sh` stops by name if one is missing.
+
+- **Non-blocking delivery** (`mode: non-blocking`, `max-buffer-size: 4m`). Docker's default is blocking, and then a
+  container that writes to stdout while CloudWatch cannot be reached stalls. Non-blocking keeps a 4 MB buffer and drops
+  messages when it is full, which is the right trade for a log (checked in Docker's documentation).
+- **The driver runs in the Docker daemon on the host, so it uses the instance role** (`CloudWatchAgentServerPolicy`
+  allows `logs:CreateLogStream` and `logs:PutLogEvents`). No container has AWS credentials, which fits the metadata
+  hop limit of 1.
+- **The groups must exist before the container starts**: the driver is not told to create them
+  (`awslogs-create-group` defaults to false), and Terraform creates them with their retention (step 3.1). A container
+  whose group is missing does not start, which fails the deploy and its health check, not silently.
+- `docker logs` and `docker compose logs`, which `deploy.sh` prints when a deploy fails, still work.
+
+#### Checked, and not yet
+
+- **Backend:** 66 unit tests (34 before, 32 new: the logger, the request logger and the guard's warning). The real
+  backend was run against a throwaway PostgreSQL and called with `curl`. The first run showed one plain-text line
+  left (`UsersController initialized`), which is why that line was changed. After that, a run with startup, a 401, a
+  bad token and a database outage had no line that was not JSON, a healthy `/api/health` was silent, a bad token gave
+  a `warn` line with no token in it, a rejected request ID was replaced, and stopping the database gave the two
+  `error` lines.
+- **`deploy.sh`:** 37 tests (11 new). Each new check was shown to fail on a broken copy (no non-blocking mode, the
+  frontend writing to the backend's group, `INSTANCE_ID` not exported to compose, the guard removed, a different
+  driver). One of the first checks turned out to pass even with a variable missing, because `grep -q` with several
+  patterns means "any of them", so it now requires every one. The real `docker compose config` resolves the
+  generated file's `logging:` block.
+- **`user_data`:** rendered with test values, it passes `bash -n`, and the section that writes `instance.env` was run
+  with a stubbed metadata service: the file has the instance ID and both group names and can be sourced under `set -u`.
+  A plan against staging: 76 to add, 0 to change.
+- **Not checked on a live instance yet:** that the daemon accepts these options and delivers, that one request to the
+  load balancer appears in the frontend and backend groups, and (after a few minutes) as a file in the S3 bucket.
+
+**Size to watch.** `user_data` carries `deploy.sh` base64-encoded and EC2 allows 16 KB. It is about 12 to 14 KB now
+(an upper bound; the plan cannot show the rendered value, because it depends on the database address), so
+`deploy.sh` has room for about 2 KB more. If it runs out, the fix is `base64gzip()`, which cloud-init unpacks.
+
 ## Credits
 
 The application in `app/` is [tedrosdev/digital-wallet](https://github.com/tedrosdev/digital-wallet),

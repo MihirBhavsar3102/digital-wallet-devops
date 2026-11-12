@@ -82,6 +82,16 @@ variable "backend_port" {
   }
 }
 
+variable "backend_log_group_name" {
+  type        = string
+  description = "CloudWatch log group that receives the backend container's output (Docker's awslogs driver, set up by deploy.sh). Must already exist: the driver does not create it."
+}
+
+variable "frontend_log_group_name" {
+  type        = string
+  description = "CloudWatch log group that receives the frontend (nginx) container's output. Must already exist."
+}
+
 variable "cloudwatch_agent_config_parameter" {
   type        = string
   description = "Name of the Parameter Store parameter that holds the CloudWatch agent's configuration. It must start with AmazonCloudWatch-, which is the only prefix the instance role may read."

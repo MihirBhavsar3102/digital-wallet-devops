@@ -17,9 +17,15 @@ TAG="${1:?usage: deploy.sh <image-tag>}"
 
 APP_DIR="${APP_DIR:-/opt/app}"   # overridden only by the tests
 # shellcheck source=/dev/null
-source "$APP_DIR/instance.env"   # REGION ACCOUNT_ID NAME_PREFIX FRONTEND_PORT BACKEND_PORT DB_HOST DB_PORT DB_NAME DB_SECRET_ARN
+source "$APP_DIR/instance.env"   # REGION ACCOUNT_ID NAME_PREFIX FRONTEND_PORT BACKEND_PORT DB_HOST DB_PORT DB_NAME DB_SECRET_ARN INSTANCE_ID BACKEND_LOG_GROUP FRONTEND_LOG_GROUP
 # SSM Run Command starts with a minimal environment: set what the AWS CLI and docker need.
 export HOME=/root AWS_DEFAULT_REGION="$REGION"
+
+# Where the containers' output goes (the compose file below). Checked first, by name, so that an instance.env
+# without them fails here and not halfway through a deploy with "unbound variable".
+: "${INSTANCE_ID:?instance.env has no INSTANCE_ID}"
+: "${BACKEND_LOG_GROUP:?instance.env has no BACKEND_LOG_GROUP}"
+: "${FRONTEND_LOG_GROUP:?instance.env has no FRONTEND_LOG_GROUP}"
 
 # Two deploys must never overlap on one instance.
 exec 9> "$APP_DIR/deploy.lock"
@@ -29,6 +35,7 @@ REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 export BACKEND_IMAGE="${REGISTRY}/${NAME_PREFIX}-backend:${TAG}"
 export FRONTEND_IMAGE="${REGISTRY}/${NAME_PREFIX}-frontend:${TAG}"
 export BACKEND_PORT FRONTEND_PORT
+export REGION INSTANCE_ID BACKEND_LOG_GROUP FRONTEND_LOG_GROUP   # substituted into the compose file below
 COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 
 echo "==> ECR login and pull (${TAG})"
@@ -73,11 +80,33 @@ services:
       # No value: compose takes these from the environment of this script, so they are never in a file.
       DATABASE_URL:
       JWT_SECRET_KEY:
+    # Container output goes to CloudWatch Logs through Docker's awslogs driver. The driver runs in the Docker
+    # daemon on the host, so it uses the instance role (CloudWatchAgentServerPolicy allows CreateLogStream and
+    # PutLogEvents); no container has credentials. The groups are created by Terraform, with a retention.
+    # "mode: non-blocking" matters: the default is blocking, and then a container that writes to stdout while
+    # CloudWatch cannot be reached would stall. Non-blocking buffers up to max-buffer-size and drops messages
+    # when that is full, which is the right trade for a log. The stream is the instance ID, like the agent's.
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${REGION}
+        awslogs-group: ${BACKEND_LOG_GROUP}
+        awslogs-stream: ${INSTANCE_ID}
+        mode: non-blocking
+        max-buffer-size: 4m
   frontend:
     image: ${FRONTEND_IMAGE}
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT}:80"
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${REGION}
+        awslogs-group: ${FRONTEND_LOG_GROUP}
+        awslogs-stream: ${INSTANCE_ID}
+        mode: non-blocking
+        max-buffer-size: 4m
 YAML
 mv "$COMPOSE_FILE.tmp" "$COMPOSE_FILE"
 # The placeholder from first boot holds the same ports until the first real deploy.

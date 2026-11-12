@@ -2,6 +2,7 @@ import {
   CanActivate,
   ExecutionContext,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -11,6 +12,8 @@ import { IS_PUBLIC_KEY } from './auth.decorators';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
+  private readonly logger = new Logger(AuthGuard.name);
+
   constructor(
     private jwtService: JwtService,
     private reflector: Reflector,
@@ -45,7 +48,9 @@ export class AuthGuard implements CanActivate {
       // so that we can access it in our route handlers
       request['user'] = payload;
     } catch (err) {
-      console.error('JWT verification failed:', err);
+      // One short warning, through Nest's logger so that it is a JSON line like the rest. It used to be
+      // console.error of the whole error object. A bad token is the caller's mistake, not a server error.
+      this.logger.warn(`JWT verification failed: ${err?.message}`);
       throw new UnauthorizedException();
     }
     return true;
