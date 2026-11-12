@@ -34,6 +34,15 @@ variable "db_instance_identifier" {
   description = "Identifier of the database instance: the DBInstanceIdentifier dimension of the AWS/RDS metrics."
 }
 
+variable "alarm_topic_arn" {
+  type        = string
+  description = "ARN of the SNS topic the alarms notify. It lives in infra/bootstrap, and not in an environment, because an e-mail subscription has to be confirmed by a click and an environment is rebuilt every day."
+  validation {
+    condition     = can(regex("^arn:aws:sns:", var.alarm_topic_arn))
+    error_message = "alarm_topic_arn must be the ARN of an SNS topic."
+  }
+}
+
 variable "log_group_names" {
   type        = map(string)
   description = "Names of the application and system log groups from the monitoring module, keyed by kind. This module needs backend and auth."
