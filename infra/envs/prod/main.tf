@@ -123,3 +123,18 @@ module "compute" {
   frontend_log_group_name           = module.monitoring.log_group_names["frontend"]
   cloudwatch_agent_config_parameter = module.monitoring.agent_config_parameter_name
 }
+
+# Dashboards and saved queries (and the alarms, in the next step). Called last, because it only reads from the
+# modules above. It is not part of "monitoring": that module is an input of compute, and one that also read
+# compute's outputs would be circular (see modules/observability/variables.tf).
+module "observability" {
+  source                           = "../../modules/observability"
+  name_prefix                      = local.name_prefix
+  autoscaling_group_name           = module.compute.autoscaling_group_name
+  alb_arn_suffix                   = module.alb.alb_arn_suffix
+  frontend_target_group_arn_suffix = module.alb.frontend_target_group_arn_suffix
+  backend_target_group_arn_suffix  = module.alb.backend_target_group_arn_suffix
+  db_instance_identifier           = module.rds.identifier
+  log_group_names                  = module.monitoring.log_group_names
+  application_errors_metric        = module.monitoring.application_errors_metric
+}
