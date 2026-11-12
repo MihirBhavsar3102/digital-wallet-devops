@@ -138,11 +138,14 @@ calls that take a `/name` argument.
    it sends a "CD failed" e-mail, cancelling does not).
 7. **Read the URLs from the Terraform output.**
    ```
-   terraform -chdir=infra/envs/staging output alb_dns_name      # open http://<value>/ ; the API answers at /api/health, Swagger at /api/docs
+   echo "http://$(terraform -chdir=infra/envs/staging output -raw alb_dns_name)/"   # the app; /api/health is the API, /api/docs is Swagger
    terraform -chdir=infra/envs/staging output dashboard_urls    # the two CloudWatch dashboards
    terraform -chdir=infra/envs/staging output alarm_names saved_query_names
    ```
    Staging gets a new load balancer address on every rebuild, so run the `ALB_URL` command from step 5 again.
+   **Type the `http://` yourself.** The load balancer has only a port 80 listener, and a browser given a bare hostname
+   tries HTTPS first, so the page never loads and Chrome reports `ERR_CONNECTION_TIMED_OUT`. If Chrome keeps
+   upgrading, use `curl http://<host>/api/health` to confirm the application is up.
 8. **(Optional) Production**, about $200 a month, so only for a demo:
    `cd infra/envs/prod; terraform init; terraform apply "-var-file=prod.tfvars"`, then set `AWS_ROLE_ARN` and
    `ALB_URL` on the `production` environment and approve the next CD run. Staging must be up, because production
