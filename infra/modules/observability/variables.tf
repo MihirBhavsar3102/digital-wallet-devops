@@ -62,14 +62,15 @@ variable "application_errors_metric" {
 
 # One set of numbers, used twice: the alarms fire at these values, and the dashboards draw them as a horizontal
 # line on the panel, so a threshold on a graph is always the real one. They are starting points; tune them
-# once there is a baseline (the p95 latency in particular is a placeholder until the load test of step 3.8).
+# once there is a baseline. The p95 latency was set from a measured baseline in step 3.8 (README, "Load test and
+# baseline"); the others are still the plan's starting values.
 variable "alarm_thresholds" {
   type = object({
     cpu_percent            = optional(number, 80)
     memory_percent         = optional(number, 85)
     disk_percent           = optional(number, 80)
     error_rate_percent     = optional(number, 5)
-    p95_latency_seconds    = optional(number, 1)
+    p95_latency_seconds    = optional(number, 0.5) # measured: about 20 ms typical, 0.37 s worst minute at 4x the load
     application_errors     = optional(number, 1)
     rds_cpu_percent        = optional(number, 80)
     rds_free_storage_bytes = optional(number, 2147483648) # 2 GiB
