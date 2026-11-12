@@ -95,6 +95,12 @@ module "alb" {
   access_log_retention_days  = var.log_retention_days
 }
 
+module "monitoring" {
+  source             = "../../modules/monitoring"
+  name_prefix        = local.name_prefix
+  log_retention_days = var.log_retention_days
+}
+
 module "compute" {
   source                = "../../modules/compute"
   name_prefix           = local.name_prefix
