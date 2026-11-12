@@ -95,6 +95,22 @@ output "app_log_group_names" {
   value       = module.monitoring.log_group_names
 }
 
+# ---------- dashboards and saved queries ----------
+output "dashboard_names" {
+  description = "Names of the two CloudWatch dashboards, by kind (infrastructure, application)."
+  value       = module.observability.dashboard_names
+}
+
+output "dashboard_urls" {
+  description = "Console links to the two dashboards, by kind."
+  value       = module.observability.dashboard_urls
+}
+
+output "saved_query_names" {
+  description = "Names of the saved Logs Insights queries."
+  value       = module.observability.saved_query_names
+}
+
 output "alb_access_logs_bucket" {
   description = "S3 bucket receiving the load balancer access logs."
   value       = module.alb.access_logs_bucket_name
