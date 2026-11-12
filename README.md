@@ -252,7 +252,8 @@ A short `user_data` script runs once per instance and:
 1. switches Ubuntu's apt sources to HTTPS (see [Ubuntu package updates over HTTPS](#ubuntu-package-updates-over-https));
 2. installs Docker Engine and the Compose plugin from Docker's official apt repository;
 3. installs the AWS CLI (used by `deploy.sh` for the ECR login and Secrets Manager) with AWS's own installer
-   from `awscli.amazonaws.com`, and the CloudWatch agent (its configuration is added in the monitoring step).
+   from `awscli.amazonaws.com`, and the CloudWatch agent, which it then starts with the configuration from
+   Parameter Store (see [CloudWatch agent](#cloudwatch-agent-step-32)).
    The CLI used to come from the Snap store, which was unreachable on 2026-11-11 and kept every new instance
    from booting, see [Boot without the Snap store](#boot-without-the-snap-store);
 4. creates `/opt/app/` containing `instance.env` (region, account ID, name prefix) and `deploy.sh`, a copy
@@ -1654,6 +1655,62 @@ S3 bucket with their own expiry (see [Access logs](#access-logs)).
 **Checked:** `terraform validate` in both environments, tflint and checkov (0 failed), and a plan against staging: 4
 log groups to create with 14 day retention, and `app_log_group_names` in the outputs. Not applied yet; nothing writes
 to the groups until steps 3.2 and 3.3.
+
+### CloudWatch agent (step 3.2)
+
+EC2 reports CPU on its own, but **not memory or disk**, so each instance runs the CloudWatch agent. Its
+configuration is written by hand in [`monitoring/cloudwatch-agent.json`](monitoring/cloudwatch-agent.json).
+
+| What | Setting | Why |
+|------|---------|-----|
+| Metrics | `cpu` (`usage_active`), `mem` (`used_percent`), `disk` (`used_percent`, the root filesystem `/` only) | the three the assignment asks for; the other mounts are tmpfs and the like |
+| Namespace | `CWAgent` | the agent's default |
+| Interval | 60 seconds | EC2's own CPU metric is every 5 minutes unless detailed monitoring is paid for, so the agent's CPU is the one-minute view |
+| Dimension | `AutoScalingGroupName`, and nothing else; `aggregation_dimensions` rolls the disk metric up to it | instances are replaced often, so a per-instance dimension would start a new series each time and every alarm and dashboard would have to chase it. The group's name is stable. The cost: the graphs are for the group (average and maximum over its instances), and to look at one instance you read its log stream, named after the instance ID |
+| Logs | `/var/log/syslog` to `/<name_prefix>/syslog`, `/var/log/auth.log` to `/<name_prefix>/auth`, stream = instance ID | the system and authentication logs |
+| Retention | not set in the file | Terraform owns it (step 3.1). The agent stops if two places set different retention for one group |
+
+**How an instance gets it.** The monitoring module stores the file, with the two log group names filled in by
+`templatefile()`, in a Parameter Store parameter called `AmazonCloudWatch-<name_prefix>-agent`. The name has to start
+with `AmazonCloudWatch-` because the AWS-managed `CloudWatchAgentServerPolicy` on the instance role lets the agent
+read exactly those parameters (checked in the policy document), so the IAM module did not change. `user_data`
+installs the agent and runs `amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c ssm:<parameter>`, which loads
+the parameter and starts (and enables) the agent. It also installs `rsyslog`, so that the two log files exist whatever
+the image includes. The agent's own variable, `${aws:AutoScalingGroupName}`, is written `$${aws:AutoScalingGroupName}`
+in the file so that Terraform does not try to fill it in.
+
+**Starting the agent is allowed to fail.** `user_data` stops at its first error, and an instance that never finishes
+booting is replaced by one that fails the same way (see [Boot without the Snap store](#boot-without-the-snap-store)).
+So a failed start only prints a line to the boot log and the instance serves traffic without metrics. The memory and
+disk alarms of step 3.7 treat missing data as a problem, so someone is told.
+
+#### Changing the agent configuration
+
+Edit the file and run `terraform apply`: only the parameter changes, so no instance is replaced. The instances are
+not told, so make them fetch it again with AWS's own Run Command document:
+
+```sh
+aws ssm send-command --document-name AmazonCloudWatch-ManageAgent \
+  --targets Key=tag:Role,Values=app \
+  --parameters action=configure,mode=ec2,optionalConfigurationSource=ssm,optionalConfigurationLocation=AmazonCloudWatch-<name_prefix>-agent,optionalRestart=yes
+```
+
+(In Git Bash set `MSYS_NO_PATHCONV=1` first.) An instance that boots later reads the new version by itself. If the
+agent does not start, `amazon-cloudwatch-agent-ctl -m ec2 -a status` shows its state and
+`/opt/aws/amazon-cloudwatch-agent/logs/configuration-validation.log` says what is wrong with the configuration.
+
+#### Checked, and not yet
+
+- **`scripts/tests/agent-config.test.sh`** (14 checks, in the `script-tests` job) renders the file the way Terraform
+  does and checks what the dashboards and alarms rely on: valid JSON, the namespace, the single dimension, the three
+  collectors, the root-only disk, both log files in their own groups, no retention. Each check was shown to fail on
+  a deliberately broken copy (a wrong namespace, an unescaped agent variable, `*` for the disk, swapped log groups,
+  a retention period, a trailing comma).
+- **A plan against staging** (76 to add, 0 to change): the parameter is valid JSON of 1032 characters (the Standard
+  tier allows 4096) with `${aws:AutoScalingGroupName}` intact, and the log groups are the right ones.
+- **Not checked on a live instance yet.** The first apply has to show that `mem_used_percent` and `disk_used_percent`
+  appear under `CWAgent` with the dimension `AutoScalingGroupName` alone, that `cpu_usage_active` does too, that
+  lines arrive in the syslog and auth log groups, and that `/var/log/auth.log` exists on this Ubuntu release.
 
 ## Credits
 

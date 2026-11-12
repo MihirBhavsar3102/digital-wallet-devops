@@ -118,4 +118,6 @@ module "compute" {
   db_port               = module.rds.port
   db_name               = module.rds.db_name
   db_secret_arn         = module.rds.master_user_secret_arn
+
+  cloudwatch_agent_config_parameter = module.monitoring.agent_config_parameter_name
 }

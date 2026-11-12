@@ -52,7 +52,7 @@ jobs:
             echo "infra=true" >> "$GITHUB_OUTPUT"   # a manual run checks everything
             exit 0
           fi
-          if git diff --name-only "$BASE_SHA" "$GITHUB_SHA" | grep -qE '^(infra/|\.tflint\.hcl$|\.checkov\.yaml$|\.github/workflows/ci\.yml$)'; then
+          if git diff --name-only "$BASE_SHA" "$GITHUB_SHA" | grep -qE '^(infra/|monitoring/|\.tflint\.hcl$|\.checkov\.yaml$|\.github/workflows/ci\.yml$)'; then
             echo "infra=true" >> "$GITHUB_OUTPUT"
           else
             echo "infra=false" >> "$GITHUB_OUTPUT"
@@ -338,6 +338,8 @@ jobs:
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/rollback-check.test.sh
       - name: check-workflows.sh
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/check-workflows.test.sh
+      - name: monitoring/cloudwatch-agent.json
+        run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/agent-config.test.sh
 
   # E-mails a failed run (SNS, see "Pipeline notifications" in the README). It lists every other job, so it
   # only starts when they have all finished, and failure() is true when any of them failed. It is false for a
