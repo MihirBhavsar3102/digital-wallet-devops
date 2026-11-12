@@ -104,6 +104,12 @@ resource "aws_autoscaling_group" "app" {
   health_check_grace_period = var.health_check_grace_period
   target_group_arns         = var.target_group_arns
 
+  # The group's own metrics (the AWS/AutoScaling namespace) are off until they are enabled. Dashboard 1 shows how
+  # many instances are in service, and a drop in it is what an instance refresh or a failing boot looks like.
+  # They cost nothing, and enabling them changes the group in place without touching an instance.
+  metrics_granularity = "1Minute"
+  enabled_metrics     = ["GroupInServiceInstances", "GroupDesiredCapacity", "GroupTotalInstances"]
+
   # Do not also create an aws_autoscaling_attachment: the provider docs say it conflicts
   # with target_group_arns.
   launch_template {

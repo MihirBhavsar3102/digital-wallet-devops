@@ -42,6 +42,37 @@ resource "aws_ssm_parameter" "agent_config" {
   }
 }
 
+# An application-level error count, made from the backend's own log lines. The load balancer's 5xx count says
+# that a request failed; this says that the application logged an error, which also catches failures that
+# did not become a 5xx. The metric is in a namespace of its own for each environment (staging and production
+# share an account and a region, and a metric filter cannot carry a fixed dimension).
+#
+# What it counts, and why not simply every error-level line: one failed request writes TWO error lines, Nest's
+# ExceptionsHandler line (with the stack) and the request logger's line for the 500 (context "http"). Counting
+# both would double every failure, and the 5xx rate is already measured at the load balancer. So the request
+# lines are left out. A line with no context field is counted (hence NOT EXISTS: a missing field makes != false).
+# Checked with `aws logs test-metric-filter` against real lines from staging, see the README.
+locals {
+  application_metric_namespace = "${var.name_prefix}/Application"
+  application_errors_pattern   = "{ ($.level = \"error\" || $.level = \"fatal\") && ($.context NOT EXISTS || $.context != \"http\") }"
+}
+
+resource "aws_cloudwatch_log_metric_filter" "application_errors" {
+  name           = "${var.name_prefix}-application-errors"
+  log_group_name = aws_cloudwatch_log_group.app["backend"].name
+  pattern        = local.application_errors_pattern
+
+  metric_transformation {
+    name      = "ApplicationErrors"
+    namespace = local.application_metric_namespace
+    value     = "1"
+    unit      = "Count"
+    # Publish 0 for log events that do not match, so the graph is a line at 0 while the application is
+    # logging normally, not a gap. While nothing is logged at all there is no data point.
+    default_value = "0"
+  }
+}
+
 resource "aws_cloudwatch_log_group" "app" {
   #checkov:skip=CKV_AWS_158:CloudWatch Logs encrypts at rest by default; a customer-managed KMS key would add cost and key management.
   #checkov:skip=CKV_AWS_338:Retention is a per-environment variable (14 days staging, 90 days prod); one year would cost more than it is worth here.
