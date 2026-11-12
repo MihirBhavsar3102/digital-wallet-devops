@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Logger,
   Post,
   Body,
   // Param,
@@ -15,7 +16,7 @@ import { UsersService } from './users.service';
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {
-    console.log('UsersController initialized');
+    new Logger(UsersController.name).log('initialized');
   }
 
   @Post('register')
