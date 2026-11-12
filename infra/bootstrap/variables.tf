@@ -22,6 +22,16 @@ variable "alert_email" {
   }
 }
 
+variable "alarm_email" {
+  type        = string
+  sensitive   = true # a personal address: kept out of plan output and logs
+  description = "E-mail address that receives the CloudWatch alarms of every environment. Personal, so it has no default and is not committed: set it in local.tfvars (git-ignored) and apply with -var-file=local.tfvars, or use -var. It can be the same address as alert_email. AWS sends a confirmation message to it, and nothing is delivered until it is accepted."
+  validation {
+    condition     = can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.alarm_email))
+    error_message = "alarm_email must look like name@example.com."
+  }
+}
+
 variable "github_repository" {
   type        = string
   description = "GitHub repository whose workflows may publish to the notification topic, as OWNER/REPO. Not secret, so it has a default."
