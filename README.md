@@ -3,10 +3,12 @@
 A DevOps assignment: take a ready-made NestJS + React + PostgreSQL wallet app and run it on AWS
 with Terraform, a GitHub Actions CI/CD pipeline, and CloudWatch monitoring.
 
-> **Status: work in progress.** The Terraform skeleton, remote state, network, security groups, ECR,
-> IAM, compute, the load balancer, the database, the staging/production variables, the quality gates,
-> the application images, `deploy.sh`, a first manual deploy, the local compose setup, the integration test
-> and the smoke test are in place. The pipeline and monitoring are not written yet.
+> **Status: work in progress.** Parts 1 to 3 are in place: the infrastructure (state, network, security groups,
+> ECR, IAM, compute, load balancer, database, staging and production), the CI/CD pipeline (pull-request checks,
+> build, staging deploy, approval-gated production deploy, rollback, notifications, hardening), and monitoring and
+> logging (log groups, the CloudWatch agent, JSON application and access logs, metrics, two dashboards, saved
+> queries, alarms, and a load test that was run against all of it). Part 4, the documentation and write-up, is next.
+> Production has never been applied; see [Not run end to end](#not-run-end-to-end-production-has-never-been-applied).
 
 ## Terraform state
 
@@ -2029,8 +2031,8 @@ publish and nobody is told. The messages hold an alarm name, a metric and a thre
 #### The alarms
 
 The thresholds are one variable, `alarm_thresholds`, and the dashboards draw the same numbers as a red line. They are
-**starting points to tune once there is a baseline**. The p95 latency (1 second) is a placeholder until step 3.8 measures
-one.
+**starting points to tune once there is a baseline**. The p95 latency was set from a measured baseline in step 3.8 (0.5
+seconds, see [Load test and baseline](#load-test-and-baseline-step-38)); the others are still the plan's starting values.
 
 | Alarm | Fires when | Missing data |
 |-------|------------|--------------|
@@ -2038,7 +2040,7 @@ one.
 | `ec2-memory-high` | memory used above 85% for 2 x 5 minutes | **breaching** |
 | `ec2-disk-high` | root disk above 80% for 2 x 5 minutes | **breaching** |
 | `alb-5xx-rate-high` | `100 * FILL(5xx, 0) / RequestCount` above 5% for 5 one-minute periods in a row | not breaching |
-| `api-latency-p95-high` | p95 of the backend's `TargetResponseTime` above 1 s for 2 x 5 minutes; too few samples are ignored | not breaching |
+| `api-latency-p95-high` | p95 of the backend's `TargetResponseTime` above 0.5 s for 2 x 5 minutes; too few samples are ignored | not breaching |
 | `alb-backend-unhealthy-hosts`, `alb-frontend-unhealthy-hosts` | one or more unhealthy targets for 3 minutes in a row | not breaching |
 | `application-errors` | the error metric of step 3.4 is 1 or more in 5 minutes | not breaching |
 | `rds-cpu-high` | database CPU above 80% for 2 x 5 minutes | **breaching** |
@@ -2081,6 +2083,90 @@ aws cloudwatch set-alarm-state --alarm-name digital-wallet-staging-application-e
 - **An alarm-status panel** on the dashboard, and composite alarms (for example one that pages only when the 5xx rate
   and the unhealthy hosts are both bad).
 - **A topic per environment.** Production alarms go to the same address as staging's.
+
+### Load test and baseline (step 3.8)
+
+Nothing in a dashboard or an alarm is proven until traffic moves it. `scripts/load/` sends a realistic mix of requests
+to the load balancer, so every panel has something to show and the alarms can be tried with real load, not only with
+`set-alarm-state`.
+
+**How to run it.** k6 runs in Docker (nothing to install), pinned by digest (k6 v2.3.0), and the runner validates its input:
+
+```sh
+scripts/load/run.sh http://<alb>                 # 10 requests a second for 5 minutes
+scripts/load/run.sh http://<alb> 10 8m 10        # 10% of the requests are deliberate 500s: fires the 5xx alarm
+DETACH=1 scripts/load/run.sh http://<alb> 1 2h   # a slow loop in the background, to keep the charts alive
+```
+
+The arguments are rate per second, duration, error percentage and number of users. A background run prints its
+container name; stop it with `docker stop <name>`. It stops by itself when the duration ends, or at once if the
+environment has been destroyed (its setup, registering users, then fails).
+
+**What it sends.** `setup()` registers a few users and opens two accounts for each. Then, by weight: the page (40%),
+balances (20%), deposits (10%), transfers (5%), history (5%), and the failures a real system sees: a 404 (7%), a request
+without a token (7%) and a wrong password (6%). Every request has an expected status and is checked. **The deliberate
+server error needs no debug route in the application:** `POST /api/auth/login` with the body `{}` makes Prisma throw,
+and the backend answers 500 and logs the two `error` lines. `ERROR_PERCENT` is the share of all requests that do this.
+
+#### What was measured (2026-11-12, one `t3.small` instance, staging)
+
+| Run | Backend latency (load balancer's `TargetResponseTime`) | Hosts and database | Result |
+|-----|--------------------------------------------------------|--------------------|--------|
+| **Baseline**, 5 min at 10 requests/s | p50 5.6 ms, p95 18.1 ms, p99 52.6 ms, slowest 114 ms. p95 per minute: 15 to 81 ms, median 18.7 | instance CPU at most 5%, memory 21%; database CPU 5%, 5 connections | 0 server errors. 5 checks failed, see "tokens" below |
+| **Stress**, 6 min at 40 requests/s (4 times) | p50 5.7 ms, p95 27.3 ms, p99 135 ms, slowest 710 ms. p95 per minute: median 23.6 ms, worst 368 ms | instance CPU at most 18.5%, memory 22%; database CPU 7%, 8 connections | 14,389 of 14,389 checks passed, 0 server errors |
+| **Error burst**, 8 min at 10 requests/s, 10% deliberate 500s | n/a | n/a | 513 server errors in 5,021 requests (10.2%); all 4,801 checks passed, so every deliberate error was a 500 |
+
+k6's own numbers agree (baseline p95 44.8 ms, stress p95 56.7 ms) and are higher because k6 runs on a laptop and sees the
+network to the load balancer, which `TargetResponseTime` leaves out.
+
+#### The p95 threshold, from the measurement
+
+The plan says to take the latency threshold from a measured baseline. **0.5 seconds**: above the worst single-minute p95 seen
+(0.37 s, at four times the normal load) and about 20 times a typical value (20 to 25 ms), so it should fire for a real
+degradation and not for noise. It is the default of `alarm_thresholds.p95_latency_seconds`, so the dashboard's red line
+moved with it. During the stress run the alarm left `INSUFFICIENT_DATA` as soon as there were enough requests, and never
+fired. There is no limit found yet: at 4 times the load the instance was at 18% CPU.
+
+#### The alarms, with real load
+
+- **`application-errors`** went OK to ALARM 90 seconds into the burst (12:53:29 IST), and **`alb-5xx-rate-high`** 7 minutes
+  and 14 seconds after it began (12:59:11 IST): it needs five one-minute periods above 5%, and CloudWatch's metrics arrive
+  a minute or so late. CloudWatch's alarm history says `Successfully executed action` on the alarm topic for both, and
+  the SNS topic counted 0 failed notifications.
+- **Forcing a state** with `set-alarm-state` also works: ALARM, an e-mail, and back to OK about 80 seconds later (the
+  recovery e-mail). `alb-5xx-rate-high` is the alarm whose panel shows why it needs five periods: a single failed
+  request in an otherwise quiet minute is a 100% rate for that minute, and the panel has two such spikes.
+- **Not exercised by load:** the CPU alarm (it peaked at 18.5% against 80%), memory, disk and the database alarms. Their
+  path to the e-mail is the same one tried above.
+
+#### What the load test found
+
+1. **A bug in my own script, which the application's 300 second tokens exposed.** The first baseline ended with 5
+   unexpected 401s (a deposit, two transfers, two history reads) in its last seconds. The backend's login tokens last
+   300 seconds (`expiresIn: '300s'`), the script logged in once at the start, and the run lasted exactly 5 minutes. A
+   "slow loop for hours" would have been nothing but 401s after five minutes. Each virtual user now takes a fresh token
+   after 4 minutes; the stress run, longer than 5 minutes, had 0 unexpected statuses.
+2. **Login is the slowest thing the application does.** `/api/auth/login` takes 35 ms on average and has a p95 of 105 ms,
+   and the slowest requests of the whole test (about 700 ms) were logins at the very start of the stress run, when every
+   virtual user logged in at once. That is bcrypt, whose cost is deliberate, and it is where the one-minute p95 of 368 ms
+   came from. *Slowest paths (p95)* shows it. Registering is next (average 100 ms).
+3. **All 38 series on the two dashboards have data**, checked by reading them out of the deployed dashboards and querying
+   CloudWatch for each one. Twenty panels were rendered with CloudWatch's `get-metric-widget-image` (the console is not
+   reachable from here) into the git-ignored `evidence/` folder.
+4. **The saved queries on real load** returned what the load was: *Failed requests by path* counted the 404s, the 401s
+   and the deliberate 500s on `/api/auth/login`; *5xx by path* found exactly the 515 server errors (513 from the burst
+   and 2 by hand); *Backend errors* showed both lines of each failure.
+5. **Each alarm e-mails once when it first leaves `INSUFFICIENT_DATA`** (an "OK" message), so creating the alarms sent
+   about nine e-mails, and a daily rebuild of staging sends them again. Removing `ok_actions` would stop that and also
+   stop the recovery e-mails.
+
+#### Checked, and not yet
+
+- **Run:** the smoke, baseline, stress and error burst above, with k6's and CloudWatch's numbers for each window. The
+  runner has its own test (`scripts/tests/load-run.test.sh`, 33 checks, five broken copies each caught).
+- **Not done:** a run that finds where the instance gives way; a CPU alarm test with real CPU (for example a short busy
+  loop through SSM); HTTPS (the load goes over plain HTTP); more than one instance; and tuning the other thresholds,
+  which keep the plan's starting values.
 
 ## Credits
 
