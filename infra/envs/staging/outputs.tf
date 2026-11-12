@@ -90,6 +90,11 @@ output "db_log_group_names" {
   value       = module.rds.log_group_names
 }
 
+output "app_log_group_names" {
+  description = "CloudWatch log groups for the application and the hosts, by kind (backend, frontend, syslog, auth)."
+  value       = module.monitoring.log_group_names
+}
+
 output "alb_access_logs_bucket" {
   description = "S3 bucket receiving the load balancer access logs."
   value       = module.alb.access_logs_bucket_name
