@@ -10,7 +10,9 @@ snap wait system seed.loaded
 sed -i '/^URIs:/ s|http://|https://|g' /etc/apt/sources.list.d/*.sources || true
 
 apt-get update
-apt-get install -y ca-certificates curl gnupg unzip
+# rsyslog writes /var/log/syslog and /var/log/auth.log, the two files the CloudWatch agent ships. It is
+# listed here so that those files exist whatever the image includes; on an image that has it, this is a no-op.
+apt-get install -y ca-certificates curl gnupg unzip rsyslog
 
 # --- Docker Engine and the Compose plugin (Docker's official apt repository)
 install -m 0755 -d /etc/apt/keyrings
@@ -33,10 +35,17 @@ unzip -q /tmp/awscliv2.zip -d /tmp
 /tmp/aws/install
 rm -rf /tmp/aws /tmp/awscliv2.zip
 
-# --- CloudWatch agent (its configuration is added in the monitoring step)
+# --- CloudWatch agent: memory and disk metrics, and /var/log/syslog and /var/log/auth.log.
+# Its configuration is monitoring/cloudwatch-agent.json, stored in Parameter Store by the monitoring module.
 curl -fsSL -o /tmp/amazon-cloudwatch-agent.deb https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
 dpkg -i -E /tmp/amazon-cloudwatch-agent.deb
 rm -f /tmp/amazon-cloudwatch-agent.deb
+# fetch-config loads the parameter, -s starts the agent (and enables it for the next reboot). Not fatal: this
+# script stops at its first error, and an instance that never finishes booting is replaced by one that fails
+# the same way (see "Boot without the Snap store" in the README). An instance without monitoring still serves
+# traffic, and an alarm on the missing metrics tells someone about it.
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c ssm:${agent_config_parameter} \
+  || echo "the CloudWatch agent did not start: this instance runs without memory and disk metrics and system logs"
 
 # --- /opt/app, instance settings and deploy.sh
 mkdir -p /opt/app/placeholder

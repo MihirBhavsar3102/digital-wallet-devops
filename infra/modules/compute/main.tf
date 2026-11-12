@@ -73,16 +73,17 @@ resource "aws_launch_template" "app" {
   }
 
   user_data = base64encode(templatefile("${path.module}/templates/user_data.sh.tftpl", {
-    region            = data.aws_region.current.region
-    account_id        = data.aws_caller_identity.current.account_id
-    name_prefix       = var.name_prefix
-    frontend_port     = var.frontend_port
-    backend_port      = var.backend_port
-    db_host           = var.db_host
-    db_port           = var.db_port
-    db_name           = var.db_name
-    db_secret_arn     = var.db_secret_arn
-    deploy_script_b64 = base64encode(file("${path.module}/../../../scripts/deploy.sh"))
+    region                 = data.aws_region.current.region
+    account_id             = data.aws_caller_identity.current.account_id
+    name_prefix            = var.name_prefix
+    frontend_port          = var.frontend_port
+    backend_port           = var.backend_port
+    db_host                = var.db_host
+    db_port                = var.db_port
+    db_name                = var.db_name
+    db_secret_arn          = var.db_secret_arn
+    agent_config_parameter = var.cloudwatch_agent_config_parameter
+    deploy_script_b64      = base64encode(file("${path.module}/../../../scripts/deploy.sh"))
   }))
 
   tag_specifications {

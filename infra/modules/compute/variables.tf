@@ -82,6 +82,15 @@ variable "backend_port" {
   }
 }
 
+variable "cloudwatch_agent_config_parameter" {
+  type        = string
+  description = "Name of the Parameter Store parameter that holds the CloudWatch agent's configuration. It must start with AmazonCloudWatch-, which is the only prefix the instance role may read."
+  validation {
+    condition     = startswith(var.cloudwatch_agent_config_parameter, "AmazonCloudWatch-")
+    error_message = "cloudwatch_agent_config_parameter must start with AmazonCloudWatch-, or the instance role cannot read it."
+  }
+}
+
 variable "target_group_arns" {
   type        = list(string)
   description = "Target groups to register instances with. Empty until the load balancer exists."
