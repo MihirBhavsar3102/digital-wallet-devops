@@ -2132,7 +2132,11 @@ fired. There is no limit found yet: at 4 times the load the instance was at 18% 
 - **`application-errors`** went OK to ALARM 90 seconds into the burst (12:53:29 IST), and **`alb-5xx-rate-high`** 7 minutes
   and 14 seconds after it began (12:59:11 IST): it needs five one-minute periods above 5%, and CloudWatch's metrics arrive
   a minute or so late. CloudWatch's alarm history says `Successfully executed action` on the alarm topic for both, and
-  the SNS topic counted 0 failed notifications.
+  the SNS topic counted 0 failed notifications since before the burst (14 published, 15 delivered).
+- **Both recovered by themselves** once the load stopped and a slow clean loop took over: `alb-5xx-rate-high` at 13:03:11
+  IST, 4 minutes after it fired, as soon as there was a quiet minute, and `application-errors` at 13:06:29 IST, 6 and a
+  half minutes after the burst's last error (it looks at 5 minutes at a time). Each ALARM to OK change executed its
+  action too, so the recovery e-mails were sent.
 - **Forcing a state** with `set-alarm-state` also works: ALARM, an e-mail, and back to OK about 80 seconds later (the
   recovery e-mail). `alb-5xx-rate-high` is the alarm whose panel shows why it needs five periods: a single failed
   request in an otherwise quiet minute is a 100% rate for that minute, and the panel has two such spikes.
