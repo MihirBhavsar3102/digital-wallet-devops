@@ -1653,8 +1653,10 @@ its retention from the start, and `terraform destroy` removes it with the enviro
 S3 bucket with their own expiry (see [Access logs](#access-logs)).
 
 **Checked:** `terraform validate` in both environments, tflint and checkov (0 failed), and a plan against staging: 4
-log groups to create with 14 day retention, and `app_log_group_names` in the outputs. Not applied yet; nothing writes
-to the groups until steps 3.2 and 3.3.
+log groups to create with 14 day retention, and `app_log_group_names` in the outputs.
+
+**Checked on staging (2026-11-12):** after the apply, the four groups exist with `retentionInDays` 14, and `terraform
+plan` reported `No changes`, so staging was exactly `main`.
 
 ### CloudWatch agent (step 3.2)
 
@@ -1708,9 +1710,25 @@ agent does not start, `amazon-cloudwatch-agent-ctl -m ec2 -a status` shows its s
   a retention period, a trailing comma).
 - **A plan against staging** (76 to add, 0 to change): the parameter is valid JSON of 1032 characters (the Standard
   tier allows 4096) with `${aws:AutoScalingGroupName}` intact, and the log groups are the right ones.
-- **Not checked on a live instance yet.** The first apply has to show that `mem_used_percent` and `disk_used_percent`
-  appear under `CWAgent` with the dimension `AutoScalingGroupName` alone, that `cpu_usage_active` does too, that
-  lines arrive in the syslog and auth log groups, and that `/var/log/auth.log` exists on this Ubuntu release.
+
+#### Checked on a live instance (2026-11-12)
+
+On a freshly built staging instance, one minute after it booted, and again over the next ten minutes:
+
+- **The boot ran the agent.** The boot trace shows the `fetch-config ... -c ssm:AmazonCloudWatch-digital-wallet-staging-agent`
+  line, and `amazon-cloudwatch-agent-ctl -m ec2 -a status` says `running` and `configured`; the service is active and
+  enabled. The agent's own log says it is piping `/var/log/syslog` and `/var/log/auth.log` to the two groups with
+  `retention -1`, meaning it leaves the retention alone: the groups still have Terraform's 14 days.
+- **The log files exist on Ubuntu 26.04.** `rsyslog` 8.2512 was installed by `user_data` and both files are there.
+- **Metrics arrive with the dimension the alarms need.** Under `CWAgent`: `mem_used_percent {AutoScalingGroupName}`;
+  `disk_used_percent` twice, the raw series `{path=/, AutoScalingGroupName, device, fstype}` and the rolled-up series
+  `{AutoScalingGroupName}` that `aggregation_dimensions` produces (the alarms and dashboards use the rolled-up one);
+  and `cpu_usage_active` under `{AutoScalingGroupName}` and `{AutoScalingGroupName, cpu=cpu-total}`. **The CPU metric
+  showed up about eight minutes after the agent started, later than memory and disk** (it is computed from two
+  samples, and CloudWatch can take minutes to list a new metric), so a graph has a gap at the start.
+- **Log lines arrive.** Both streams are named after the instance ID and hold events from the instance's first boot
+  (the agent reads a file from its start): systemd and `useradd` lines for the system log and the auth log.
+- **Not checked:** what the agent does after a reboot, and the alarms on missing metrics (step 3.7).
 
 ### Application and access logs (step 3.3)
 
@@ -1791,12 +1809,131 @@ Terraform passes in); `deploy.sh` stops by name if one is missing.
 - **`user_data`:** rendered with test values, it passes `bash -n`, and the section that writes `instance.env` was run
   with a stubbed metadata service: the file has the instance ID and both group names and can be sourced under `set -u`.
   A plan against staging: 76 to add, 0 to change.
-- **Not checked on a live instance yet:** that the daemon accepts these options and delivers, that one request to the
-  load balancer appears in the frontend and backend groups, and (after a few minutes) as a file in the S3 bucket.
+
+#### Checked on a live instance (2026-11-12)
+
+The release was deployed by re-running the CD run for `main` (after pointing `ALB_URL` at the rebuilt load balancer,
+see [After a rebuild of staging](#after-a-rebuild-of-staging)), then six requests were sent through the load balancer.
+
+- **The daemon accepts the options.** `docker inspect` shows both containers with the `awslogs` driver and exactly
+  `awslogs-group`, `awslogs-region`, `awslogs-stream` (the instance ID), `mode: non-blocking` and `max-buffer-size: 4m`.
+- **The backend group.** 36 events in ten minutes, **none that is not JSON**. The request with a made-up
+  `X-Request-Id` came back with it, a rejected token produced one `warn` line without the token, the query string
+  (`?token=SECRETQUERY`) was not in any line, and the two lines that mention `/api/health` are Nest's startup route
+  mapping, so the health check itself is silent.
+- **The frontend group** holds the request as a JSON line (with `x_forwarded_for`). Its non-JSON lines are nginx's
+  own one-time startup messages (the entrypoint scripts and `[notice]` lines of the error log). **The load balancer's
+  health check shows up here, 12 lines in 15 minutes**, which is noise; nginx could leave it out of the access log
+  the way the backend does (not done).
+- **The load balancer's access log reached S3** within five minutes (it is delivered in 5 minute batches), and the
+  line for the 404 carries `Root=1-6af557ea-47b6c42570e5c327686e3f7b`, which is the `traceId` of the backend's line for
+  the same request. So a request can be followed from the load balancer to the application.
+- **A request that fails on purpose, with no debug route in the application:** `POST /api/auth/login` with an empty
+  body `{}` makes Prisma throw, and the backend answers 500 and writes the two `error` lines (the exception with its
+  stack, and the request line). Step 3.8 uses it for load.
 
 **Size to watch.** `user_data` carries `deploy.sh` base64-encoded and EC2 allows 16 KB. It is about 12 to 14 KB now
 (an upper bound; the plan cannot show the rendered value, because it depends on the database address), so
 `deploy.sh` has room for about 2 KB more. If it runs out, the fix is `base64gzip()`, which cloud-init unpacks.
+
+### Metrics: application and database (steps 3.4 and 3.5)
+
+Almost every metric already exists, because AWS publishes it (the load balancer, the database, EC2) or because step
+3.2 made the agent publish it. These two steps are about **choosing the right ones, knowing their exact names and
+dimensions, and adding the two that did not exist**: an application error count, and the Auto Scaling group's own
+metrics. The names and dimensions below were read from CloudWatch on live staging (2026-11-12), not copied from
+documentation. Dashboards (3.6) and alarms (3.7) use exactly these.
+
+| Question | Namespace and metric | Dimensions | Statistic |
+|----------|----------------------|------------|-----------|
+| Is a host busy? (1 minute) | `CWAgent` `cpu_usage_active` | `AutoScalingGroupName` | Average, Maximum |
+| The same, from EC2 (5 minutes) | `AWS/EC2` `CPUUtilization` | `AutoScalingGroupName` | Average, Maximum |
+| Is memory or disk filling up? | `CWAgent` `mem_used_percent`, `disk_used_percent` | `AutoScalingGroupName` | Average, Maximum |
+| How much network? | `AWS/EC2` `NetworkIn`, `NetworkOut` | `AutoScalingGroupName` | Sum |
+| How many instances are serving? | `AWS/AutoScaling` `GroupInServiceInstances` | `AutoScalingGroupName` | Average (**enabled in this step**) |
+| Request rate | `AWS/ApplicationELB` `RequestCount` | `LoadBalancer` | Sum |
+| Responses by class | `HTTPCode_Target_2XX_Count`, `_4XX_Count`, `_5XX_Count` | `LoadBalancer` and `TargetGroup` | Sum |
+| Latency | `TargetResponseTime` | `LoadBalancer` and `TargetGroup` | p50, p95, p99 |
+| Are targets healthy? | `HealthyHostCount`, `UnHealthyHostCount` | `TargetGroup` and `LoadBalancer` | Minimum, Maximum |
+| Did the application log an error? | `<name_prefix>/Application` `ApplicationErrors` | none | Sum (**new in this step**) |
+| Database load and room | `AWS/RDS` `CPUUtilization`, `FreeableMemory`, `FreeStorageSpace`, `DatabaseConnections`, `ReadIOPS`, `WriteIOPS`, `ReadLatency`, `WriteLatency`, `DiskQueueDepth` | `DBInstanceIdentifier` | Average |
+
+The load balancer dimensions are the ARN suffixes the `alb` module already outputs (`app/<name>/<id>` and
+`targetgroup/<name>/<id>`). Listings also show the identifiers of earlier, destroyed load balancers (three older ones
+appeared), so dashboards and alarms always name the current one explicitly.
+
+**One honest limit.** The `AWS/ApplicationELB` metrics are measured at the load balancer: request rate, status
+codes, and how long the *target* took to answer. They say nothing about time spent inside the application code, and
+`TargetResponseTime` is not what a browser sees (it leaves out the network to the user). Measuring inside the code
+would need instrumentation, listed under "Not done" below.
+
+#### Error rate, and why `FILL`
+
+The error rate is `100 * FILL(HTTPCode_Target_5XX_Count, 0) / RequestCount`, a metric math expression. **A 5xx metric
+does not exist until the first 5xx happens**: after ten minutes of traffic that included 404s and 401s, the listing
+had `HTTPCode_Target_2XX_Count` and `_4XX_Count` but no `_5XX_Count`. Without `FILL(..., 0)` the expression has no data
+at exactly the moment everything is healthy, and an alarm would sit in "insufficient data". When there is no traffic at
+all, `RequestCount` is missing too, and the alarm has to treat that as fine (step 3.7).
+
+#### The application error count
+
+A metric filter on the backend group counts error-level lines into `ApplicationErrors`
+(`<name_prefix>/Application`, one namespace per environment, because staging and production share an account and a
+metric filter cannot carry a fixed dimension). It says something the load balancer cannot: **the application logged an
+error**, including one that never became a 5xx.
+
+**Why not simply count every error line.** The live logs showed that one failed request writes *two* `error` lines,
+Nest's `ExceptionsHandler` line (with the stack) and the request logger's line for the 500 (`context: "http"`).
+Counting both doubles every failure, and the 5xx rate is already measured at the load balancer. So the filter leaves
+the `http` lines out:
+
+```
+{ ($.level = "error" || $.level = "fatal") && ($.context NOT EXISTS || $.context != "http") }
+```
+
+`NOT EXISTS` is there because a missing field makes `!=` false: a plain `$.context != "http"` would silently skip an
+error line that has no context. The pattern was tested with `aws logs test-metric-filter` (a read-only call that
+tests a pattern against sample lines) on the real lines in the backend group (about forty, from the live checks above)
+plus a few synthetic ones: a `fatal`, an error with no `context`, and an `http` error with status 503:
+
+| Pattern | Exception line | `http` 500 line | `fatal` | error with no context |
+|---------|:--------------:|:---------------:|:-------:|:---------------------:|
+| every error or fatal line | counted | **counted (double)** | counted | counted |
+| `... && $.context != "http"` | counted | not counted | counted | **not counted (a gap)** |
+| the pattern above | counted | not counted | counted | counted |
+
+It counts one for each exception and nothing for 4xx, startup, or the health check.
+
+#### Database metrics (step 3.5)
+
+The metric names in the table were confirmed against `AWS/RDS` for the instance (the plan said to confirm them), along
+with `DBLoad`, which Performance Insights adds. What was checked live: enhanced monitoring writes to the shared
+`RDSOSMetrics` log group (30 day retention), Performance Insights is on, the monitoring interval is 60 seconds, and the
+PostgreSQL log group has its stream. Slow queries (`log_min_duration_statement`, step 1.8) arrive in that group; no slow
+query was run in this session.
+
+#### The Auto Scaling group's metrics
+
+The group's own metrics (the `AWS/AutoScaling` namespace) are off until enabled, and none existed. The compute module
+now enables `GroupInServiceInstances`, `GroupDesiredCapacity` and `GroupTotalInstances` at one-minute granularity.
+Dashboard 1 shows instances in service, and a drop in it is what an instance refresh or a failing boot looks like.
+It is free, and a plan against live staging shows it as an in-place change of the group (no instance is touched).
+
+#### Checked, and not yet
+
+- **The filter pattern** against real log lines, as above. The first attempt used hand-written samples passed on the
+  command line and disagreed with what the live `filter-log-events` returned for the same line, because Windows
+  argument quoting had mangled a sample; it was redone with events pulled from CloudWatch and passed in a JSON file.
+- **A plan against live staging:** 1 to add (the filter), 1 to change (the group, in place), 0 to destroy.
+- **Not applied yet**, so not checked: that `ApplicationErrors` is published and that `GroupInServiceInstances` appears.
+  After the apply, `POST /api/auth/login` with `{}` makes one failure that should add exactly 1 (not 2).
+
+#### Not done
+
+- **Instrumenting the application itself** (a Prometheus client with a `/metrics` route, or CloudWatch embedded
+  metric format), which would give timings inside the code. It is the next improvement.
+- **Per-route metrics.** The logs have `path` and `durationMs`, so Logs Insights can compute them (step 3.6), but there
+  is no metric per route.
 
 ## Credits
 
