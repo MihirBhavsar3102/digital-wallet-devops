@@ -631,11 +631,12 @@ password, and neither the JWT key nor any database password value appears in the
 The outputs are the same in both environments and are all descriptions, names and ARNs, never a secret value:
 the load balancer DNS name, the VPC ID, the subnet IDs per tier, the three security group IDs, the Auto
 Scaling group name, the ECR repository URLs, the database endpoint, the database secret's ARN and the JWT
-secret's ARN, the database log group names, the access log bucket, and the GitHub deploy role ARN. The state
-bucket's name is an output of `infra/bootstrap/`, where the bucket is created.
+secret's ARN, the database log group names, the application and system log group names (`app_log_group_names`,
+step 3.1), the access log bucket, and the GitHub deploy role ARN. The state bucket's name is an output of
+`infra/bootstrap/`, where the bucket is created.
 
-Not written yet, because the monitoring module does not exist: the `alarm_email` variable, and the SNS topic
-and dashboard outputs. They are added with the monitoring step.
+Not written yet: the `alarm_email` variable, and the SNS topic and dashboard outputs. They are added with the
+alarms and dashboards of [Part 3](#monitoring-and-logging-part-3).
 
 ## JWT secret
 
@@ -809,7 +810,7 @@ known limit. This is not decided yet.
 |------|---------|
 | `app/` | The sample application (imported unmodified, then changed in later commits) |
 | `infra/bootstrap/` | One-off Terraform that creates the remote-state bucket and the account-wide GitHub OIDC provider |
-| `infra/modules/` | Reusable Terraform modules |
+| `infra/modules/` | Reusable Terraform modules (`monitoring/`: log groups, and from the later steps of Part 3 the dashboards, saved queries and alarms) |
 | `infra/envs/staging/`, `infra/envs/prod/` | One folder per environment, both calling the same modules |
 | `.github/workflows/` | GitHub Actions pipelines (`ci.yml` for pull requests) |
 | `.github/dependabot.yml` | One weekly pull request with all minor and patch dependency updates (npm, Docker, GitHub Actions, Terraform) |
@@ -866,10 +867,10 @@ and a line here, so the reason is next to the code and also in one list.
 | `CKV_AWS_157` | database | Multi-AZ is the `db_multi_az` variable: off in staging to save cost, on in production |
 | `CKV_AWS_145` | state bucket and ALB log bucket | SSE-S3 (AES256) is free, and load balancer access logs support SSE-S3 only, not KMS |
 | `CKV_AWS_136` | ECR repositories | AES256 (the ECR default) is free; a customer-managed key adds cost and key management |
-| `CKV_AWS_158` | database log groups | CloudWatch Logs encrypts at rest by default; a customer-managed key adds cost |
+| `CKV_AWS_158` | database, application and system log groups | CloudWatch Logs encrypts at rest by default; a customer-managed key adds cost |
 | `CKV_AWS_354` | database | Performance Insights uses the default AWS-managed key |
 | `CKV_AWS_149` | JWT secret | The secret uses the default AWS-managed Secrets Manager key |
-| `CKV_AWS_338` | database log groups | Retention is a per-environment variable (14 days staging, 90 days prod); a year costs more than it is worth here |
+| `CKV_AWS_338` | database, application and system log groups | Retention is a per-environment variable (14 days staging, 90 days prod); a year costs more than it is worth here |
 | `CKV_AWS_144` | state bucket and ALB log bucket | One region is enough, and replication would add cost |
 | `CKV_AWS_18` | state bucket and ALB log bucket | Access logging needs another bucket to hold the logs |
 | `CKV_AWS_21` | ALB log bucket | The logs expire, and versioning would keep deleted versions and add cost. (The state bucket is versioned.) |
@@ -1616,6 +1617,43 @@ and production's required reviewer.
   from the runner (the payload fetched a script from `gist.githubusercontent.com`). The runners here are GitHub's, with no
   egress filtering.
 - **A second reviewer** for production (above).
+
+## Monitoring and logging (Part 3)
+
+Everything is CloudWatch and everything is Terraform, in `infra/modules/monitoring/` (the database's own log
+groups and enhanced monitoring stay in the `rds` module, because they must exist before the instance). One
+limit to keep in mind when reading the dashboards: the load balancer's metrics show request rate, errors and
+latency **at the edge**, as the client sees them, not timings inside the application code.
+
+| What the assignment asks for | Where it comes from | Step |
+|------------------------------|---------------------|------|
+| CPU, memory, disk of the instances | `AWS/EC2` CPU, and the CloudWatch agent for memory and disk (EC2 does not report them) | 3.2 |
+| Request rate, error rate, latency | `AWS/ApplicationELB` metrics, error rate by metric math | 3.4 |
+| Database metrics | `AWS/RDS`, enhanced monitoring, Performance Insights | 3.5 |
+| Application, system and access logs | the log groups below | 3.1 to 3.3 |
+| Dashboards, saved queries, alarms | `monitoring` module | 3.6, 3.7 |
+
+### Log groups (step 3.1)
+
+Terraform creates four log groups per environment, named `/<name_prefix>/<kind>`, with `retention_in_days` set from
+`log_retention_days` (14 days in staging, 90 in production):
+
+| Log group | What goes in | Written by |
+|-----------|--------------|------------|
+| `/<name_prefix>/backend` | backend container output, one JSON object per line | Docker's `awslogs` driver (step 3.3) |
+| `/<name_prefix>/frontend` | nginx: the JSON access log and the error log | Docker's `awslogs` driver (step 3.3) |
+| `/<name_prefix>/syslog` | `/var/log/syslog` of each instance | the CloudWatch agent (step 3.2) |
+| `/<name_prefix>/auth` | `/var/log/auth.log` of each instance | the CloudWatch agent (step 3.2) |
+
+**Why Terraform creates them.** A log group that is left to be created by the first write (by the agent or by the
+Docker driver) never expires, and keeps costing money for as long as the account exists. Created here, each one has
+its retention from the start, and `terraform destroy` removes it with the environment. The two database groups
+(`postgresql` and `upgrade`) are created the same way in the `rds` module. The load balancer's access logs go to an
+S3 bucket with their own expiry (see [Access logs](#access-logs)).
+
+**Checked:** `terraform validate` in both environments, tflint and checkov (0 failed), and a plan against staging: 4
+log groups to create with 14 day retention, and `app_log_group_names` in the outputs. Not applied yet; nothing writes
+to the groups until steps 3.2 and 3.3.
 
 ## Credits
 
