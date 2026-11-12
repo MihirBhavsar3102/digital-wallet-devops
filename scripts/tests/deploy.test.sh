@@ -46,6 +46,9 @@ DB_HOST="db.test"
 DB_PORT="5432"
 DB_NAME="digital_wallet"
 DB_SECRET_ARN="arn:aws:secretsmanager:ap-south-1:123456789012:secret:rds!db-abc-AbCdEf"
+INSTANCE_ID=i-0123456789abcdef0
+BACKEND_LOG_GROUP=/digital-wallet-staging/backend
+FRONTEND_LOG_GROUP=/digital-wallet-staging/frontend
 ENV
 
   cat > "$BIN/aws" <<'STUB'
@@ -68,6 +71,8 @@ STUB
   cat > "$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "docker $* | DATABASE_URL=${DATABASE_URL:-} | JWT=${JWT_SECRET_KEY:-}" >> "$CALLS"
+# What compose is given for its ${...} substitution (the log settings), kept for the tests to read.
+[ "$1" = compose ] && env | grep -E '^(REGION|INSTANCE_ID|BACKEND_LOG_GROUP|FRONTEND_LOG_GROUP)=' | sort > "$CALLS.composeenv"
 case "$1" in
   login) cat > /dev/null ;;
   run) if [ "${FAIL_MIGRATE:-}" = 1 ]; then echo "P3009 migrate found failed migrations" >&2; exit 1; fi ;;
@@ -127,6 +132,26 @@ check "compose file uses the ports from instance.env" grep -q '${BACKEND_PORT}' 
 check "the tag is recorded" grep -qx v1 "$APP_DIR/current-tag"
 check "the backend is checked on its health route" called "/api/health"
 
+echo "# container logs go to CloudWatch (step 3.3)"
+COMPOSE="$APP_DIR/docker-compose.yml"
+check "both containers use the awslogs driver" test "$(grep -c 'driver: awslogs' "$COMPOSE")" -eq 2
+check "the backend logs to its own group" grep -qF 'awslogs-group: ${BACKEND_LOG_GROUP}' "$COMPOSE"
+check "the frontend logs to its own group" grep -qF 'awslogs-group: ${FRONTEND_LOG_GROUP}' "$COMPOSE"
+check "both log to the region of the instance" test "$(grep -cF 'awslogs-region: ${REGION}' "$COMPOSE")" -eq 2
+check "the stream is the instance ID, as for the agent's logs" test "$(grep -cF 'awslogs-stream: ${INSTANCE_ID}' "$COMPOSE")" -eq 2
+# The default is blocking: if CloudWatch cannot be reached, the container's writes to stdout would block and
+# the application would stall. Non-blocking keeps a buffer and, once it is full, does not enqueue new messages.
+check "delivery is non-blocking, so a slow CloudWatch cannot stall the application" \
+  test "$(grep -cE '^ +mode: non-blocking$' "$COMPOSE")" -eq 2
+compose_gets() {   # compose_gets <NAME=value>...: every one is in the environment of "docker compose"
+  local want
+  for want in "$@"; do grep -qxF -- "$want" "$CALLS.composeenv" || return 1; done
+}
+check "compose is given the group names, the instance ID and the region from instance.env" \
+  compose_gets 'BACKEND_LOG_GROUP=/digital-wallet-staging/backend' 'FRONTEND_LOG_GROUP=/digital-wallet-staging/frontend' \
+    'INSTANCE_ID=i-0123456789abcdef0' 'REGION=ap-south-1'
+check "the logging settings do not hold a secret" bash -c '! grep -qF -e "$0" -e "$1" "$2"' "$DB_PASSWORD" "$JWT_VALUE" "$COMPOSE"
+
 echo "# a failed migration stops before anything is restarted"
 setup; export FAIL_MIGRATE=1; run_deploy v1
 check "exits non-zero" rc_not 0
@@ -139,6 +164,12 @@ echo "# a failed health check fails the deploy"
 setup; export FAIL_HEALTH=1; run_deploy v1
 check "exits non-zero" rc_not 0
 check "no tag is recorded" test ! -e "$APP_DIR/current-tag"
+
+echo "# an instance.env without the log group names stops the deploy before anything is pulled"
+setup; sed -i '/^BACKEND_LOG_GROUP=/d' "$APP_DIR/instance.env"; run_deploy v1
+check "exits non-zero" rc_not 0
+check "names the missing setting" grep -q "BACKEND_LOG_GROUP" <<< "$OUT"
+check "pulls nothing and restarts nothing" test ! -s "$CALLS"
 
 echo "# input checks"
 setup; run_deploy 'v1;rm -rf /'
