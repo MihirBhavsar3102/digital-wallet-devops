@@ -114,7 +114,7 @@ resource "aws_cloudwatch_metric_alarm" "error_rate_high" {
 
 resource "aws_cloudwatch_metric_alarm" "latency_high" {
   alarm_name          = "${var.name_prefix}-api-latency-p95-high"
-  alarm_description   = "The 95th percentile of how long the backend takes to answer was above ${local.limit.p95_latency_seconds} s for 10 minutes. The threshold is a placeholder until a baseline is measured (step 3.8). 'Slowest paths (p95)' shows which endpoint."
+  alarm_description   = "The 95th percentile of how long the backend takes to answer was above ${local.limit.p95_latency_seconds} s for 10 minutes (normal is about 20 ms; the threshold was set from a measured baseline, README 'Load test and baseline'). 'Slowest paths (p95)' shows which endpoint."
   namespace           = "AWS/ApplicationELB"
   metric_name         = "TargetResponseTime"
   dimensions          = { TargetGroup = local.be_tg, LoadBalancer = local.lb }
