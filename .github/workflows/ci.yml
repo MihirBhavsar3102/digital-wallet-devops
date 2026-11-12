@@ -100,7 +100,7 @@ jobs:
           exit "$status"
 
       - name: shellcheck on the scripts and their tests
-        run: docker run --rm -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" scripts/*.sh scripts/tests/*.sh
+        run: docker run --rm -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" scripts/*.sh scripts/tests/*.sh scripts/load/*.sh
 
       - name: actionlint on the workflows
         run: docker run --rm -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color
@@ -340,6 +340,8 @@ jobs:
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/check-workflows.test.sh
       - name: monitoring/cloudwatch-agent.json
         run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/agent-config.test.sh
+      - name: scripts/load/run.sh
+        run: docker run --rm -v "$PWD:/repo:ro" "$PYTHON_IMAGE" bash /repo/scripts/tests/load-run.test.sh
 
   # E-mails a failed run (SNS, see "Pipeline notifications" in the README). It lists every other job, so it
   # only starts when they have all finished, and failure() is true when any of them failed. It is false for a
