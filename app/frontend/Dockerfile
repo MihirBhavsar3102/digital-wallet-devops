@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build: Vite bundle
-FROM node:22.23.4-bookworm-slim AS build
+FROM node:22.23.5-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
