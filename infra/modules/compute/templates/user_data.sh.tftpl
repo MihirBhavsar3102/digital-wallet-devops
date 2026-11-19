@@ -9,6 +9,18 @@ snap wait system seed.loaded
 # sources file on a future image from aborting the whole boot.
 sed -i '/^URIs:/ s|http://|https://|g' /etc/apt/sources.list.d/*.sources || true
 
+# The regional mirror (<region>.ec2.archive.ubuntu.com) belongs to Canonical, not to AWS. On 2026-11-19 it
+# answered 503 to every request for hours while security.ubuntu.com and archive.ubuntu.com were fine. This
+# script stops at its first error, so the first "apt-get install" aborted the boot, no instance ever
+# finished booting, and the group replaced them one after another (the same failure as the Snap store
+# outage described below). So: use the regional mirror when it answers, and Canonical's main archive
+# (also served over HTTPS) when it does not. The retries cover a request that fails once and then works.
+if ! curl -fsSI -m 10 "https://${region}.ec2.archive.ubuntu.com/ubuntu/dists/$(. /etc/os-release && echo $VERSION_CODENAME)/InRelease" > /dev/null; then
+  echo "the regional Ubuntu mirror does not answer: using archive.ubuntu.com"
+  sed -i 's|https://[a-z0-9-]*\.ec2\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/sources.list.d/*.sources || true
+fi
+echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
+
 apt-get update
 # rsyslog writes /var/log/syslog and /var/log/auth.log, the two files the CloudWatch agent ships. It is
 # listed here so that those files exist whatever the image includes; on an image that has it, this is a no-op.
