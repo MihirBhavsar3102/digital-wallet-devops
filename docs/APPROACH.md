@@ -37,7 +37,9 @@ onward.
   real time: GitHub's immutable OIDC subject format broke the first login (CHALLENGES row 16).
 - **Boot must not depend on a service I do not control.** On 2026-11-11 the Snap store was unreachable and stopped every new
   instance from booting (row 17), so the AWS CLI now comes from AWS's own installer and a failing boot is reported as
-  a failing boot, not a failing deploy.
+  a failing boot, not a failing deploy. On 2026-11-19 Canonical's regional Ubuntu mirror answered 503 and did the same
+  (row 27), so the boot script now falls back to `archive.ubuntu.com`. Docker's package repository is still a hard
+  dependency at boot.
 - **A green check must mean something.** A module cycle silently dropped ten checkov checks while the job stayed
   green (row 20); I compare per-check totals against `main` after restructuring modules.
 

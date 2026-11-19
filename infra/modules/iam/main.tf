@@ -149,11 +149,16 @@ data "aws_iam_policy_document" "github_deploy" {
     actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
   }
+  # BatchGetImage is what ECR checks for the HEAD request on a tag's manifest. Docker 29 (the containerd
+  # image store, on the ubuntu-26.04 runner that ubuntu-latest moved to in November 2026) sends that
+  # request before it writes the tag, and without this permission "docker push" fails after all layers are
+  # uploaded with "unexpected status from HEAD request ... 403 Forbidden". Docker 28 on ubuntu-24.04 did not.
   statement {
     sid = "EcrPush"
     actions = [
       "ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload",
       "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:PutImage",
+      "ecr:BatchGetImage",
     ]
     resources = var.ecr_repository_arns
   }
