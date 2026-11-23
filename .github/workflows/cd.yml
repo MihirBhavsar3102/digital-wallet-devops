@@ -77,7 +77,7 @@ jobs:
 
       - name: Log in to ECR
         id: ecr
-        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+        uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2.2.0
 
       # Tags are immutable, so pushing a tag that exists is rejected. A re-run of a commit whose images
       # were pushed (the run failed later, or someone re-ran it) must therefore not push again. Decision:
@@ -325,7 +325,7 @@ jobs:
 
       - name: Log in to ECR
         id: ecr
-        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+        uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2.2.0
 
       # Production runs the image that passed staging, not a second build of the commit. The two
       # environments have separate repositories, so the two images are copied across, inside ECR, with the
